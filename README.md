@@ -5,7 +5,7 @@ PDF security/decryption core library for Fileloom.
 Coordinates:
 
 ```kotlin
-implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.0-SNAPSHOT")
+implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.0")
 ```
 
 ## Requirements

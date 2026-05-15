@@ -2,10 +2,11 @@ plugins {
     kotlin("jvm") version "2.2.10"
     `java-library`
     `maven-publish`
+    signing
 }
 
 group = providers.gradleProperty("group").orNull ?: "dev.jaeyoung"
-version = providers.gradleProperty("version").orNull ?: "0.1.0-SNAPSHOT"
+version = providers.gradleProperty("version").orNull ?: "0.1.0"
 
 description = "Fileloom PDF security/decryption core library"
 
@@ -29,6 +30,9 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 }
+
+val requiresSigning = !version.toString().endsWith("SNAPSHOT") &&
+    gradle.startParameter.taskNames.any { it.contains("publish", ignoreCase = true) }
 
 publishing {
     publications {
@@ -58,4 +62,23 @@ publishing {
             }
         }
     }
+
+    repositories {
+        maven {
+            name = "centralPublishing"
+            url = layout.buildDirectory.dir("central-publishing").get().asFile.toURI()
+        }
+    }
+}
+
+signing {
+    isRequired = requiresSigning
+    if (requiresSigning) {
+        useGpgCmd()
+    }
+    sign(publishing.publications["mavenJava"])
+}
+
+tasks.withType<org.gradle.plugins.signing.Sign>().configureEach {
+    onlyIf { requiresSigning }
 }
