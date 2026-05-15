@@ -4,8 +4,8 @@ plugins {
     `maven-publish`
 }
 
-group = "dev.jaeyoung"
-version = "0.1.0-SNAPSHOT"
+group = providers.gradleProperty("group").orNull ?: "dev.jaeyoung"
+version = providers.gradleProperty("version").orNull ?: "0.1.0-SNAPSHOT"
 
 description = "Fileloom PDF security/decryption core library"
 
