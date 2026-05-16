@@ -32,6 +32,10 @@ public object FileloomPdfDecryptor {
             if (output.exists() && !options.overwriteOutput) {
                 return PdfDecryptResult.IoFailure(IllegalStateException("Output already exists"))
             }
+            if (input.exceedsMaxInputBytes(options.maxInputBytes)) {
+                return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
+            }
+
             val context = openSecurityContext(input).getOrElse { t ->
                 return PdfDecryptResult.MalformedPdf(t.message ?: t.javaClass.simpleName)
             }
@@ -57,12 +61,7 @@ public object FileloomPdfDecryptor {
                 return PdfDecryptResult.InvalidPassword
             }
 
-            val inputBytes = input.readAllBytes()
-            options.maxInputBytes?.let { maxInputBytes ->
-                if (inputBytes.size.toLong() > maxInputBytes) {
-                    return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
-                }
-            }
+            val inputBytes = input.readAllBytesBounded(options.maxInputBytes)
             val decrypted = rewriteClassicPdfWithoutEncryption(
                 inputBytes = inputBytes,
                 fileKey = fileKey,
@@ -743,11 +742,29 @@ private inline fun <T> PdfSecurityInput.useByteSource(block: (PdfByteSource) -> 
     }
 }
 
-private fun PdfSecurityInput.readAllBytes(): ByteArray {
+private fun PdfSecurityInput.exceedsMaxInputBytes(maxInputBytes: Long?): Boolean {
+    val limit = maxInputBytes ?: return false
+    val length = when (this) {
+        is PdfSecurityInput.FileInput -> file.length()
+        is PdfSecurityInput.ByteSourceInput -> source.use { it.length }
+    }
+    return length > limit
+}
+
+private fun PdfSecurityInput.readAllBytesBounded(maxInputBytes: Long?): ByteArray {
     return when (this) {
-        is PdfSecurityInput.FileInput -> file.readBytes()
+        is PdfSecurityInput.FileInput -> {
+            val size = file.length()
+            requireAllowedInputSize(size, maxInputBytes)
+            file.readBytes()
+        }
         is PdfSecurityInput.ByteSourceInput -> source.use { securitySource ->
-            val output = ByteArray(securitySource.length.toInt())
+            val length = securitySource.length
+            requireAllowedInputSize(length, maxInputBytes)
+            if (length > Int.MAX_VALUE.toLong()) {
+                throw IllegalArgumentException("Input is too large")
+            }
+            val output = ByteArray(length.toInt())
             var position = 0
             while (position < output.size) {
                 val read = securitySource.read(position.toLong(), output, position, output.size - position)
@@ -756,6 +773,13 @@ private fun PdfSecurityInput.readAllBytes(): ByteArray {
             }
             output.copyOf(position)
         }
+    }
+}
+
+private fun requireAllowedInputSize(size: Long, maxInputBytes: Long?) {
+    if (size < 0) throw IllegalArgumentException("Input length must be non-negative")
+    if (maxInputBytes != null && size > maxInputBytes) {
+        throw IllegalArgumentException("Input exceeds maxInputBytes")
     }
 }
 
