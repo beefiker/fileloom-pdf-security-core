@@ -756,7 +756,7 @@ private fun PdfSecurityInput.exceedsMaxInputBytes(maxInputBytes: Long?): Boolean
     val limit = maxInputBytes ?: return false
     return when (this) {
         is PdfSecurityInput.FileInput -> file.length() > limit
-        is PdfSecurityInput.ByteSourceInput -> false
+        is PdfSecurityInput.ByteSourceInput -> source.length > limit
     }
 }
 
