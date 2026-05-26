@@ -33,6 +33,9 @@ public object FileloomPdfDecryptor {
                 return PdfDecryptResult.IoFailure(IllegalStateException("Output already exists"))
             }
             if (input.exceedsMaxInputBytes(options.maxInputBytes)) {
+                if (input is PdfSecurityInput.ByteSourceInput) {
+                    input.source.close()
+                }
                 return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
             }
 
