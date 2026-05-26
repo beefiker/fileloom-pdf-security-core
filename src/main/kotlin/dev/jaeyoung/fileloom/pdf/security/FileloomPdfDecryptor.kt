@@ -64,7 +64,14 @@ public object FileloomPdfDecryptor {
                 return PdfDecryptResult.InvalidPassword
             }
 
-            val inputBytes = input.readAllBytesBounded(options.maxInputBytes)
+            val inputBytes = try {
+                input.readAllBytesBounded(options.maxInputBytes)
+            } catch (e: IllegalArgumentException) {
+                if (e.message == "Input exceeds maxInputBytes") {
+                    return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
+                }
+                throw e
+            }
             val decrypted = rewriteClassicPdfWithoutEncryption(
                 inputBytes = inputBytes,
                 fileKey = fileKey,
