@@ -126,6 +126,32 @@ class FileloomPdfDecryptorTest {
     }
 
     @Test
+    fun decryptToFilePreservesPlainAesV2StringTokensThatAreNotCipherPayloads() {
+        val encrypted = writeR4AesEncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "AES title",
+            plaintextStream = "Hello from AESV2",
+            extraObjects = listOf(
+                7 to "<< /Producer (Fileloom test) /PlainShortHex <ABCD> >>"
+            )
+        )
+        val output = File.createTempFile("fileloom-decrypted-aes-plain-token", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        val outputText = output.readText(Charsets.ISO_8859_1)
+        assertFalse(outputText.contains("/Encrypt"))
+        assertTrue(outputText.contains("Hello from AESV2"), outputText)
+        assertTrue(outputText.contains("/Producer (Fileloom test)"), outputText)
+        assertTrue(outputText.contains("/PlainShortHex <ABCD>"), outputText)
+    }
+
+    @Test
     fun decryptToFileWritesUnencryptedPdfForR2Rc4Fixture() {
         val encrypted = writeR2EncryptedPdf(userPassword = "fileloom", plaintextTitle = "Secret title")
         val output = File.createTempFile("fileloom-decrypted-r2", ".pdf").apply { delete() }
@@ -205,7 +231,8 @@ class FileloomPdfDecryptorTest {
     private fun writeR4AesEncryptedPdf(
         userPassword: String,
         plaintextTitle: String,
-        plaintextStream: String? = null
+        plaintextStream: String? = null,
+        extraObjects: List<Pair<Int, String>> = emptyList()
     ): File {
         val ownerEntry = ByteArray(32) { index -> (0x70 + index).toByte() }
         val fileId = ByteArray(16) { index -> (0x40 + index).toByte() }
@@ -232,6 +259,7 @@ class FileloomPdfDecryptorTest {
             )
             objects += 6 to "<< /Length ${encryptedStream.size} >>\nstream\n${encryptedStream.toLatin1String()}\nendstream"
         }
+        objects += extraObjects
 
         return writePdf(
             *objects.toTypedArray(),

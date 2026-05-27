@@ -6,9 +6,12 @@ plugins {
 }
 
 group = providers.gradleProperty("group").orNull ?: "dev.jaeyoung"
-version = providers.gradleProperty("version").orNull ?: "0.1.0"
+version = providers.gradleProperty("version").orNull ?: "0.1.3"
 
 description = "Fileloom PDF security/decryption core library"
+
+val centralPublishingDir = layout.buildDirectory.dir("central-publishing")
+val mavenCentralBundleDir = layout.buildDirectory.dir("maven-central-bundle")
 
 java {
     toolchain {
@@ -66,7 +69,7 @@ publishing {
     repositories {
         maven {
             name = "centralPublishing"
-            url = layout.buildDirectory.dir("central-publishing").get().asFile.toURI()
+            url = centralPublishingDir.get().asFile.toURI()
         }
     }
 }
@@ -81,4 +84,25 @@ signing {
 
 tasks.withType<org.gradle.plugins.signing.Sign>().configureEach {
     onlyIf { requiresSigning }
+}
+
+val cleanMavenCentralBundle by tasks.registering(Delete::class) {
+    delete(centralPublishingDir, mavenCentralBundleDir)
+}
+
+tasks.named("publishMavenJavaPublicationToCentralPublishingRepository") {
+    dependsOn(cleanMavenCentralBundle)
+}
+
+tasks.register<Zip>("publishToMavenCentralBundle") {
+    description = "Builds a Maven Central upload bundle ZIP under build/maven-central-bundle/."
+    group = "publishing"
+    dependsOn("publishMavenJavaPublicationToCentralPublishingRepository")
+    from(centralPublishingDir)
+    destinationDirectory.set(mavenCentralBundleDir)
+    archiveFileName.set("${project.name}-${project.version}-maven-central-bundle.zip")
+    doLast {
+        logger.lifecycle("Maven Central bundle ready at ${archiveFile.get().asFile.absolutePath}")
+        logger.lifecycle("Upload at https://central.sonatype.com/publishing")
+    }
 }

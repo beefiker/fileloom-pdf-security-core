@@ -453,6 +453,11 @@ public object FileloomPdfDecryptor {
                 index += 1
                 continue
             }
+            if (!canDecryptObjectString(parsed.bytes, cipherMethod)) {
+                output.append(body.substring(index, parsed.endExclusive))
+                index = parsed.endExclusive
+                continue
+            }
             val plain = decryptObjectBytes(objectKey, parsed.bytes, cipherMethod)
             output.append(plain.toPdfLiteralString())
             index = parsed.endExclusive
@@ -467,8 +472,21 @@ public object FileloomPdfDecryptor {
     ): String {
         return Regex("<([0-9A-Fa-f\\s]+)>").replace(body) { match ->
             val cipherText = match.groupValues[1].filterNot { it.isWhitespace() }.hexToBytes()
+            if (!canDecryptObjectString(cipherText, cipherMethod)) return@replace match.value
             val plain = decryptObjectBytes(objectKey, cipherText, cipherMethod)
             plain.toPdfLiteralString()
+        }
+    }
+
+    private fun canDecryptObjectString(
+        bytes: ByteArray,
+        cipherMethod: PdfObjectCipherMethod
+    ): Boolean {
+        return when (cipherMethod) {
+            PdfObjectCipherMethod.Rc4 -> true
+            PdfObjectCipherMethod.AesV2 -> bytes.size > AESV2_IV_BYTES &&
+                (bytes.size - AESV2_IV_BYTES) % AES_BLOCK_BYTES == 0
+            PdfObjectCipherMethod.Unsupported -> false
         }
     }
 
@@ -653,6 +671,8 @@ public object FileloomPdfDecryptor {
         0x2E, 0x2E, 0x00, 0xB6.toByte(), 0xD0.toByte(), 0x68, 0x3E, 0x80.toByte(),
         0x2F, 0x0C, 0xA9.toByte(), 0xFE.toByte(), 0x64, 0x53, 0x69, 0x7A
     )
+    private const val AESV2_IV_BYTES = 16
+    private const val AES_BLOCK_BYTES = 16
 }
 
 public data class PdfDecryptOptions(

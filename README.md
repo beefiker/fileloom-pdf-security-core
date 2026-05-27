@@ -5,7 +5,7 @@ PDF security/decryption core library for Fileloom.
 Coordinates:
 
 ```kotlin
-implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.0")
+implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.3")
 ```
 
 ## Requirements
@@ -16,8 +16,16 @@ implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.0")
 Run tests:
 
 ```bash
-gradle test
+./gradlew test
 ```
+
+Maven Central bundle ZIP:
+
+```bash
+./gradlew publishToMavenCentralBundle
+```
+
+The task writes `build/maven-central-bundle/fileloom-pdf-security-core-<version>-maven-central-bundle.zip`.
 
 ## Goal
 
