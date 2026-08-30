@@ -12,6 +12,7 @@ import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.math.BigDecimal
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -278,16 +279,11 @@ internal class PdfClassicDecryptingRewriter(
     }
 
     private fun locateStreamKeyword(bytes: ByteArray, start: Int): Int? {
-        val limit = minOf(bytes.size - STREAM_KEYWORD.size, start + STREAM_KEYWORD_SEARCH_BYTES)
-        for (index in start..limit) {
-            if (STREAM_KEYWORD.indices.all { offset ->
-                    bytes[index + offset] == STREAM_KEYWORD[offset]
-                }
-            ) {
-                return index
-            }
-        }
-        return null
+        val token = PdfLexer(
+            ByteArrayPdfByteSource(bytes),
+            startPosition = start.toLong(),
+        ).nextToken() as? PdfToken.Keyword ?: return null
+        return token.offset.toInt().takeIf { token.value == "stream" }
     }
 
     private fun skipStreamLineEnding(bytes: ByteArray, start: Int): Int {
@@ -342,7 +338,6 @@ internal class PdfClassicDecryptingRewriter(
     private companion object {
         const val MAX_NON_STREAM_OBJECT_BYTES = 8L * 1024L * 1024L
         const val STREAM_HEADER_PROBE_BYTES = 64 * 1024
-        const val STREAM_KEYWORD_SEARCH_BYTES = 256
         val STREAM_KEYWORD = "stream".toByteArray(Charsets.US_ASCII)
         val DIRECT_LENGTH_REGEX = Regex("(/Length\\s+)\\d+")
         val REMOVED_TRAILER_KEYS = setOf("Size", "Encrypt", "Prev", "XRefStm")
@@ -521,7 +516,7 @@ private fun serializePdfObject(value: PdfObject): String = when (value) {
     PdfObject.Null -> "null"
     is PdfObject.BooleanValue -> value.value.toString()
     is PdfObject.IntegerValue -> value.value.toString()
-    is PdfObject.RealValue -> value.value.toString()
+    is PdfObject.RealValue -> BigDecimal.valueOf(value.value).stripTrailingZeros().toPlainString()
     is PdfObject.Name -> "/${escapePdfName(value.value)}"
     is PdfObject.StringValue -> value.bytes.joinToString(prefix = "<", postfix = ">", separator = "") {
         "%02X".format(it.toInt() and 0xFF)
