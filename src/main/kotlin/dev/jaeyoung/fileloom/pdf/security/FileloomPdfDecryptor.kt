@@ -43,6 +43,7 @@ public object FileloomPdfDecryptor {
                 maxInputBytes = options.maxInputBytes,
             )
             ownedInputSpool = seekableInput.ownedSpool
+            PdfClassicFileLayoutReader.appendCanonicalStartXrefTail(seekableInput.file)
 
             val context = openSecurityContext(PdfSecurityInput.FileInput(seekableInput.file)).getOrElse { t ->
                 return PdfDecryptResult.MalformedPdf(t.message ?: t.javaClass.simpleName)

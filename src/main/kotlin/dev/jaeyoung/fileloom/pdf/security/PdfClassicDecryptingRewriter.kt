@@ -98,7 +98,12 @@ internal class PdfClassicDecryptingRewriter(
             val objectBytes = readRange(source, location.sourceOffset, rangeLength.toInt())
             val stream = parseStreamEnvelope(objectBytes, location)
             if (stream == null) {
-                val objectText = objectBytes.toString(Charsets.ISO_8859_1)
+                val objectEnd = locateNonStreamObjectEnd(objectBytes)
+                    ?: throw PdfStreamingRewriteException(
+                        code = "object-syntax-truncated",
+                        message = "Object has no lexical endobj terminator",
+                    )
+                val objectText = objectBytes.copyOfRange(0, objectEnd).toString(Charsets.ISO_8859_1)
                 target.writeLatin1(
                     decryptObjectSyntax(
                         text = objectText,
@@ -120,10 +125,27 @@ internal class PdfClassicDecryptingRewriter(
         val prefixLength = minOf(rangeLength, MAX_NON_STREAM_OBJECT_BYTES).toInt()
         val prefix = readRange(source, location.sourceOffset, prefixLength)
         val stream = parseStreamEnvelope(prefix, location)
-            ?: throw PdfStreamingRewriteException(
+        if (stream == null) {
+            val objectEnd = locateNonStreamObjectEnd(prefix)
+                ?: throw PdfStreamingRewriteException(
                 code = "non-stream-object-too-large",
-                message = "Non-stream object exceeds the syntax budget",
+                    message = "Non-stream object syntax exceeds the bounded probe",
+                )
+            val objectText = prefix.copyOfRange(0, objectEnd).toString(Charsets.ISO_8859_1)
+            target.writeLatin1(
+                decryptObjectSyntax(
+                    text = objectText,
+                    objectKey = pdfObjectKey(
+                        fileKey,
+                        location.objectNumber,
+                        location.generation,
+                        cipherMethod,
+                    ),
+                    cipherMethod = cipherMethod,
+                )
             )
+            return
+        }
         writeStreamObject(source, target, location, prefix, stream)
     }
 
@@ -154,14 +176,11 @@ internal class PdfClassicDecryptingRewriter(
             )
         }
         val payloadEnd = payloadOffset + stream.encryptedLength
-        val tailLength = location.sourceEndExclusive - payloadEnd
-        if (tailLength > MAX_NON_STREAM_OBJECT_BYTES) {
-            throw PdfStreamingRewriteException(
-                code = "stream-tail-too-large",
-                message = "Stream object tail exceeds the syntax budget",
-            )
-        }
-        val tail = readRange(source, payloadEnd, tailLength.toInt())
+        val tail = readValidatedStreamTail(
+            source = source,
+            payloadEnd = payloadEnd,
+            objectEndExclusive = location.sourceEndExclusive,
+        )
         val objectKey = pdfObjectKey(
             fileKey,
             location.objectNumber,
@@ -296,6 +315,56 @@ internal class PdfClassicDecryptingRewriter(
             startPosition = start.toLong(),
         ).nextToken() as? PdfToken.Keyword ?: return null
         return token.offset.toInt().takeIf { token.value == "stream" }
+    }
+
+    private fun locateNonStreamObjectEnd(bytes: ByteArray): Int? {
+        val lexer = PdfLexer(ByteArrayPdfByteSource(bytes))
+        while (true) {
+            val token = lexer.nextToken() ?: return null
+            if (token is PdfToken.Keyword && token.value == "endobj") {
+                return includeOneLineEnding(bytes, token.offset.toInt() + "endobj".length)
+            }
+        }
+    }
+
+    private fun readValidatedStreamTail(
+        source: RandomAccessFile,
+        payloadEnd: Long,
+        objectEndExclusive: Long,
+    ): ByteArray {
+        val available = objectEndExclusive - payloadEnd
+        if (available <= 0L) {
+            throw PdfStreamingRewriteException(
+                code = "stream-terminator-invalid",
+                message = "Stream payload has no terminator",
+            )
+        }
+        val probeLength = minOf(available, MAX_NON_STREAM_OBJECT_BYTES).toInt()
+        val probe = readRange(source, payloadEnd, probeLength)
+        val lexer = PdfLexer(ByteArrayPdfByteSource(probe))
+        val endStream = lexer.nextToken() as? PdfToken.Keyword
+        val endObject = lexer.nextToken() as? PdfToken.Keyword
+        if (endStream?.value != "endstream" || endObject?.value != "endobj") {
+            throw PdfStreamingRewriteException(
+                code = "stream-terminator-invalid",
+                message = "Declared stream boundary is not followed by endstream and endobj",
+            )
+        }
+        val tailEnd = includeOneLineEnding(probe, endObject.offset.toInt() + "endobj".length)
+        return probe.copyOfRange(0, tailEnd)
+    }
+
+    private fun includeOneLineEnding(bytes: ByteArray, start: Int): Int {
+        if (start >= bytes.size) return start
+        return when (bytes[start]) {
+            '\r'.code.toByte() -> if (start + 1 < bytes.size && bytes[start + 1] == '\n'.code.toByte()) {
+                start + 2
+            } else {
+                start + 1
+            }
+            '\n'.code.toByte(), ' '.code.toByte(), '\t'.code.toByte() -> start + 1
+            else -> start
+        }
     }
 
     private fun skipStreamLineEnding(bytes: ByteArray, start: Int): Int {

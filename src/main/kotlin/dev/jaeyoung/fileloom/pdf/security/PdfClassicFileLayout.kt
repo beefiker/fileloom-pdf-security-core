@@ -54,6 +54,14 @@ internal enum class PdfStreamingRewriteFailureKind {
 }
 
 internal object PdfClassicFileLayoutReader {
+    fun appendCanonicalStartXrefTail(input: File) {
+        val offset = findStartXref(input)
+        RandomAccessFile(input, "rw").use { file ->
+            file.seek(file.length())
+            file.write("\nstartxref\n$offset\n%%EOF\n".toByteArray(Charsets.ISO_8859_1))
+        }
+    }
+
     fun read(input: File): PdfClassicFileLayout {
         val fileLength = input.length()
         val startXref = findStartXref(input)
@@ -153,22 +161,21 @@ internal object PdfClassicFileLayoutReader {
             file.seek(tailStart)
             file.readFully(tail)
             val text = tail.toString(Charsets.ISO_8859_1)
-            val markerIndex = text.lastIndexOf(STARTXREF_MARKER)
-            if (markerIndex < 0) {
-                throw PdfStreamingRewriteException(
-                    code = "startxref-missing",
-                    message = "Missing startxref marker",
-                )
+            val lines = text.lineSequence().toList()
+            for (lineIndex in lines.indices.reversed()) {
+                if (lines[lineIndex].trim() != STARTXREF_MARKER) continue
+                val offset = lines
+                    .drop(lineIndex + 1)
+                    .firstOrNull { it.isNotBlank() }
+                    ?.trim()
+                    ?.takeIf { value -> value.isNotEmpty() && value.all(Char::isDigit) }
+                    ?.toLongOrNull()
+                if (offset != null) return offset
             }
-            var cursor = markerIndex + STARTXREF_MARKER.length
-            while (cursor < text.length && text[cursor].isWhitespace()) cursor += 1
-            val numberStart = cursor
-            while (cursor < text.length && text[cursor].isDigit()) cursor += 1
-            return text.substring(numberStart, cursor).toLongOrNull()
-                ?: throw PdfStreamingRewriteException(
-                    code = "startxref-invalid",
-                    message = "Invalid startxref offset",
-                )
+            throw PdfStreamingRewriteException(
+                code = "startxref-missing",
+                message = "Missing valid startxref marker",
+            )
         }
     }
 
