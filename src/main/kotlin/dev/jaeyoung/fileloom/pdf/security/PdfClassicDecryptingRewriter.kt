@@ -134,14 +134,26 @@ internal class PdfClassicDecryptingRewriter(
         prefix: ByteArray,
         stream: StreamEnvelope,
     ) {
-        val payloadOffset = location.sourceOffset + stream.payloadOffset
-        val payloadEnd = payloadOffset + stream.encryptedLength
-        if (payloadEnd > location.sourceEndExclusive) {
+        val relativePayloadOffset = stream.payloadOffset.toLong()
+        if (location.sourceOffset > Long.MAX_VALUE - relativePayloadOffset) {
+            throw PdfStreamingRewriteException(
+                code = "stream-payload-out-of-range",
+                message = "Stream payload offset exceeds its object range",
+            )
+        }
+        val payloadOffset = location.sourceOffset + relativePayloadOffset
+        val availablePayloadBytes = location.sourceEndExclusive - payloadOffset
+        if (
+            payloadOffset < location.sourceOffset ||
+            availablePayloadBytes < 0L ||
+            stream.encryptedLength > availablePayloadBytes
+        ) {
             throw PdfStreamingRewriteException(
                 code = "stream-payload-out-of-range",
                 message = "Direct stream length exceeds its object range",
             )
         }
+        val payloadEnd = payloadOffset + stream.encryptedLength
         val tailLength = location.sourceEndExclusive - payloadEnd
         if (tailLength > MAX_NON_STREAM_OBJECT_BYTES) {
             throw PdfStreamingRewriteException(
@@ -165,7 +177,7 @@ internal class PdfClassicDecryptingRewriter(
         when (cipherMethod) {
             PdfObjectCipherMethod.Rc4 -> {
                 val header = decryptObjectSyntax(
-                    updateDirectStreamLength(stream.headerText, stream.encryptedLength),
+                    stream.headerText,
                     objectKey,
                     cipherMethod,
                 )
@@ -216,12 +228,12 @@ internal class PdfClassicDecryptingRewriter(
     ): StreamEnvelope? {
         val source = ByteArrayPdfByteSource(objectBytes)
         val lexer = PdfLexer(source)
-        val objectNumber = (lexer.nextToken() as? PdfToken.IntegerNumber)?.value?.toInt()
-        val generation = (lexer.nextToken() as? PdfToken.IntegerNumber)?.value?.toInt()
+        val objectNumber = (lexer.nextToken() as? PdfToken.IntegerNumber)?.value
+        val generation = (lexer.nextToken() as? PdfToken.IntegerNumber)?.value
         val objectKeyword = (lexer.nextToken() as? PdfToken.Keyword)?.value
         if (
-            objectNumber != location.objectNumber ||
-            generation != location.generation ||
+            objectNumber != location.objectNumber.toLong() ||
+            generation != location.generation.toLong() ||
             objectKeyword != "obj"
         ) {
             throw PdfStreamingRewriteException(
