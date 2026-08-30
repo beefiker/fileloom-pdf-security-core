@@ -6,7 +6,7 @@ plugins {
 }
 
 group = providers.gradleProperty("group").orNull ?: "dev.jaeyoung"
-version = providers.gradleProperty("version").orNull ?: "0.1.3"
+version = providers.gradleProperty("version").orNull ?: "0.1.5"
 
 description = "Fileloom PDF security/decryption core library"
 

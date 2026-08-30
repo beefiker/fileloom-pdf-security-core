@@ -5,7 +5,7 @@ PDF security/decryption core library for Fileloom.
 Coordinates:
 
 ```kotlin
-implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.4")
+implementation("dev.jaeyoung:fileloom-pdf-security-core:0.1.5")
 ```
 
 ## Requirements
@@ -65,7 +65,7 @@ Tested with deterministic synthetic fixtures:
 - Encrypted hex strings, literal strings, and simple streams.
 - Rewritten stream dictionaries with direct `/Length` values updated to decrypted plaintext length.
 - 64 KiB streaming decryption for supported classic-xref RC4 and AESV2 stream payloads.
-- Atomic output publication with bounded object syntax, seekable byte-source staging, and temp/spool cleanup on failure.
+- Atomic output publication with bounded object syntax, stable bounded input snapshots, sparse rewritten xref sections, caller-output preservation, and temp/spool cleanup on failure.
 
 Known unsupported areas:
 
