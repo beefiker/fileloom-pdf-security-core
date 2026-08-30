@@ -32,6 +32,11 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    filter {
+        excludeTestsMatching(
+            "dev.jaeyoung.fileloom.pdf.security.FileloomPdfStreamingMemoryTest"
+        )
+    }
 }
 
 val streamingMemoryTest by tasks.registering(Test::class) {
