@@ -231,6 +231,19 @@ internal fun sha256OfFirstStream(file: File): String {
     return digest.digest().toHex()
 }
 
+internal fun corruptLastByteOfFirstStream(file: File) {
+    val descriptor = firstStreamDescriptor(file)
+    require(descriptor.length > 0L)
+    RandomAccessFile(file, "rw").use { output ->
+        val position = descriptor.payloadOffset + descriptor.length - 1L
+        output.seek(position)
+        val original = output.read()
+        require(original >= 0)
+        output.seek(position)
+        output.write(original xor 0x01)
+    }
+}
+
 private fun firstStreamDescriptor(file: File): PdfTestStreamDescriptor {
     RandomAccessFile(file, "r").use { input ->
         val prefix = ByteArray(minOf(file.length(), 64L * 1024L).toInt())
