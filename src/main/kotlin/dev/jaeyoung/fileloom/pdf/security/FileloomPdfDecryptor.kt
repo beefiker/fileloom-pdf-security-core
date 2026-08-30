@@ -5,14 +5,14 @@ import dev.jaeyoung.fileloom.pdf.source.PdfByteSource
 import dev.jaeyoung.fileloom.pdf.syntax.PdfObject
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 public object FileloomPdfDecryptor {
     public fun inspect(input: PdfSecurityInput): PdfSecurityInspection {
@@ -28,18 +28,23 @@ public object FileloomPdfDecryptor {
         output: File,
         options: PdfDecryptOptions = PdfDecryptOptions()
     ): PdfDecryptResult {
+        var ownedInputSpool: File? = null
+        var outputTemp: File? = null
+        var fileKeyToClear: ByteArray? = null
         return try {
             if (output.exists() && !options.overwriteOutput) {
                 return PdfDecryptResult.IoFailure(IllegalStateException("Output already exists"))
             }
-            if (input.exceedsMaxInputBytes(options.maxInputBytes)) {
-                if (input is PdfSecurityInput.ByteSourceInput) {
-                    input.source.close()
-                }
-                return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
-            }
+            val outputDirectory = output.absoluteFile.parentFile ?: File(".").absoluteFile
+            outputDirectory.mkdirs()
+            val seekableInput = stageSeekableSecurityInput(
+                input = input,
+                outputDirectory = outputDirectory,
+                maxInputBytes = options.maxInputBytes,
+            )
+            ownedInputSpool = seekableInput.ownedSpool
 
-            val context = openSecurityContext(input).getOrElse { t ->
+            val context = openSecurityContext(PdfSecurityInput.FileInput(seekableInput.file)).getOrElse { t ->
                 return PdfDecryptResult.MalformedPdf(t.message ?: t.javaClass.simpleName)
             }
             val security = context.securityDictionary
@@ -59,50 +64,68 @@ public object FileloomPdfDecryptor {
             val fileId = context.fileId
                 ?: return PdfDecryptResult.MalformedPdf("Missing trailer /ID for encrypted PDF")
             val fileKey = computeFileKey(password, security, fileId)
+            fileKeyToClear = fileKey
             val validPassword = validateUserPassword(fileKey, security, fileId)
             if (!validPassword) {
                 return PdfDecryptResult.InvalidPassword
             }
 
-            val inputBytes = try {
-                input.readAllBytesBounded(options.maxInputBytes)
-            } catch (e: IllegalArgumentException) {
-                if (e.message == "Input exceeds maxInputBytes") {
-                    return PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
-                }
-                throw e
-            }
-            val decrypted = rewriteClassicPdfWithoutEncryption(
-                inputBytes = inputBytes,
+            val layout = PdfClassicFileLayoutReader.read(seekableInput.file)
+            outputTemp = File(
+                outputDirectory,
+                "${output.name}.tmp-${System.nanoTime()}",
+            )
+            val decryptedObjectCount = PdfClassicDecryptingRewriter(
+                input = seekableInput.file,
+                output = outputTemp,
+                layout = layout,
                 fileKey = fileKey,
                 cipherMethod = cipherMethod,
-                encryptObjectNumber = context.encryptObjectNumber
-            )
+                encryptObjectNumber = context.encryptObjectNumber,
+            ).rewrite()
 
-            output.parentFile?.mkdirs()
-            val tmp = File(output.parentFile ?: File("."), "${output.name}.tmp-${System.nanoTime()}")
             try {
-                tmp.writeBytes(decrypted)
                 Files.move(
-                    tmp.toPath(),
+                    outputTemp.toPath(),
                     output.toPath(),
                     StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    outputTemp.toPath(),
+                    output.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
                 )
             } catch (_: UnsupportedOperationException) {
-                Files.move(tmp.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            } finally {
-                tmp.delete()
+                Files.move(
+                    outputTemp.toPath(),
+                    output.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
             }
             PdfDecryptResult.Success(
                 outputFile = output,
                 inspection = context.inspection,
-                decryptedObjectCount = countIndirectObjects(decrypted.toString(Charsets.ISO_8859_1))
+                decryptedObjectCount = decryptedObjectCount,
             )
+        } catch (error: PdfStreamingRewriteException) {
+            output.delete()
+            PdfDecryptResult.UnsupportedEncryption("${error.code}: ${error.message}")
+        } catch (error: IllegalArgumentException) {
+            output.delete()
+            if (error.message == "Input exceeds maxInputBytes") {
+                PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
+            } else {
+                PdfDecryptResult.IoFailure(error)
+            }
         } catch (t: Throwable) {
             output.delete()
             PdfDecryptResult.IoFailure(t)
         } finally {
+            outputTemp?.delete()
+            ownedInputSpool?.delete()
+            fileKeyToClear?.fill(0)
             password.fill('\u0000')
         }
     }
@@ -320,317 +343,6 @@ public object FileloomPdfDecryptor {
         return value.contentEquals(userEntry.copyOf(16))
     }
 
-    private fun rewriteClassicPdfWithoutEncryption(
-        inputBytes: ByteArray,
-        fileKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod,
-        encryptObjectNumber: Int?
-    ): ByteArray {
-        val inputText = inputBytes.toString(Charsets.ISO_8859_1)
-        if (inputText.lineSequence().none { it.trim() == "xref" }) {
-            throw IllegalArgumentException("Only classic xref PDFs are currently supported")
-        }
-
-        val objectRegex = Regex("(?s)(\\d+)\\s+(\\d+)\\s+obj\\s*(.*?)\\s*endobj")
-        val objects = objectRegex.findAll(inputText).mapNotNull { match ->
-            val objectNumber = match.groupValues[1].toInt()
-            val generation = match.groupValues[2].toInt()
-            if (encryptObjectNumber != null && objectNumber == encryptObjectNumber) return@mapNotNull null
-            val body = decryptObjectBody(
-                body = match.groupValues[3],
-                fileKey = fileKey,
-                cipherMethod = cipherMethod,
-                objectNumber = objectNumber,
-                generation = generation
-            )
-            PdfPlainObject(objectNumber, generation, body)
-        }.toList()
-        if (objects.isEmpty()) throw IllegalArgumentException("No indirect objects found")
-
-        val maxObjectId = objects.maxOf { it.objectNumber }
-        val offsets = IntArray(maxObjectId + 1) { -1 }
-        val output = StringBuilder()
-        output.append(inputText.lineSequence().firstOrNull()?.takeIf { it.startsWith("%PDF-") } ?: "%PDF-1.4")
-            .append('\n')
-        objects.sortedWith(compareBy<PdfPlainObject> { it.objectNumber }.thenBy { it.generation }).forEach { obj ->
-            offsets[obj.objectNumber] = output.length
-            output.append(obj.objectNumber).append(' ').append(obj.generation).append(" obj\n")
-            output.append(obj.body).append('\n')
-            output.append("endobj\n")
-        }
-        val startXref = output.length
-        output.append("xref\n")
-        output.append("0 ").append(maxObjectId + 1).append('\n')
-        output.append("0000000000 65535 f \n")
-        for (objectNumber in 1..maxObjectId) {
-            val offset = offsets[objectNumber]
-            if (offset >= 0) {
-                output.append(offset.toString().padStart(10, '0')).append(" 00000 n \n")
-            } else {
-                output.append("0000000000 65535 f \n")
-            }
-        }
-        output.append("trailer\n")
-        output.append("<< /Size ").append(maxObjectId + 1)
-        trailerBodyWithoutSizeOrEncrypt(inputText)?.let { trailerBody ->
-            if (trailerBody.isNotBlank()) output.append(' ').append(trailerBody.trim())
-        }
-        output.append(" >>\n")
-        output.append("startxref\n")
-        output.append(startXref).append('\n')
-        output.append("%%EOF\n")
-        return output.toString().toByteArray(Charsets.ISO_8859_1)
-    }
-
-    private fun decryptObjectBody(
-        body: String,
-        fileKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod,
-        objectNumber: Int,
-        generation: Int
-    ): String {
-        val objectKey = objectKey(fileKey, objectNumber, generation, cipherMethod)
-        val stringsDecrypted = decryptStringsOutsideStreams(body, objectKey, cipherMethod)
-        return decryptStreamsInObject(stringsDecrypted, objectKey, cipherMethod)
-    }
-
-    private fun decryptStreamsInObject(
-        body: String,
-        objectKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): String {
-        return Regex("(?s)(.*?stream\\r?\\n)(.*?)(\\r?\\nendstream)").replace(body) { match ->
-            val beforeStream = match.groupValues[1]
-            val encrypted = match.groupValues[2].toByteArray(Charsets.ISO_8859_1)
-            val plainBytes = decryptObjectBytes(objectKey, encrypted, cipherMethod)
-            val plain = plainBytes.toString(Charsets.ISO_8859_1)
-            val beforeWithUpdatedLength = updateDirectStreamLength(beforeStream, plainBytes.size)
-            "$beforeWithUpdatedLength$plain${match.groupValues[3]}"
-        }
-    }
-
-    private fun decryptStringsOutsideStreams(
-        body: String,
-        objectKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): String {
-        return transformOutsideStreamData(body) { nonStreamBody ->
-            val literalDecrypted = decryptLiteralStringsInObject(nonStreamBody, objectKey, cipherMethod)
-            decryptHexStringsInObject(literalDecrypted, objectKey, cipherMethod)
-        }
-    }
-
-    private fun transformOutsideStreamData(body: String, transform: (String) -> String): String {
-        val streamRegex = Regex("(?s)stream\\r?\\n.*?\\r?\\nendstream")
-        val output = StringBuilder()
-        var cursor = 0
-        for (match in streamRegex.findAll(body)) {
-            output.append(transform(body.substring(cursor, match.range.first)))
-            output.append(match.value)
-            cursor = match.range.last + 1
-        }
-        output.append(transform(body.substring(cursor)))
-        return output.toString()
-    }
-
-    private fun decryptLiteralStringsInObject(
-        body: String,
-        objectKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): String {
-        val output = StringBuilder(body.length)
-        var index = 0
-        while (index < body.length) {
-            if (body[index] != '(') {
-                output.append(body[index])
-                index += 1
-                continue
-            }
-
-            val parsed = parsePdfLiteralString(body, index)
-            if (parsed == null) {
-                output.append(body[index])
-                index += 1
-                continue
-            }
-            if (!canDecryptObjectString(parsed.bytes, cipherMethod)) {
-                output.append(body.substring(index, parsed.endExclusive))
-                index = parsed.endExclusive
-                continue
-            }
-            val plain = decryptObjectBytes(objectKey, parsed.bytes, cipherMethod)
-            output.append(plain.toPdfLiteralString())
-            index = parsed.endExclusive
-        }
-        return output.toString()
-    }
-
-    private fun decryptHexStringsInObject(
-        body: String,
-        objectKey: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): String {
-        return Regex("<([0-9A-Fa-f\\s]+)>").replace(body) { match ->
-            val cipherText = match.groupValues[1].filterNot { it.isWhitespace() }.hexToBytes()
-            if (!canDecryptObjectString(cipherText, cipherMethod)) return@replace match.value
-            val plain = decryptObjectBytes(objectKey, cipherText, cipherMethod)
-            plain.toPdfLiteralString()
-        }
-    }
-
-    private fun canDecryptObjectString(
-        bytes: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): Boolean {
-        return when (cipherMethod) {
-            PdfObjectCipherMethod.Rc4 -> true
-            PdfObjectCipherMethod.AesV2 -> bytes.size > AESV2_IV_BYTES &&
-                (bytes.size - AESV2_IV_BYTES) % AES_BLOCK_BYTES == 0
-            PdfObjectCipherMethod.Unsupported -> false
-        }
-    }
-
-    private fun updateDirectStreamLength(beforeStream: String, plainLength: Int): String {
-        val lengthRegex = Regex("(/Length\\s+)\\d+")
-        val match = lengthRegex.findAll(beforeStream).lastOrNull() ?: return beforeStream
-        val prefix = match.groups[1]?.value ?: return beforeStream
-        return beforeStream.replaceRange(match.range, "$prefix$plainLength")
-    }
-
-    private fun parsePdfLiteralString(text: String, start: Int): ParsedPdfLiteralString? {
-        if (start >= text.length || text[start] != '(') return null
-
-        val bytes = mutableListOf<Int>()
-        var index = start + 1
-        var depth = 1
-        while (index < text.length) {
-            when (val char = text[index]) {
-                '(' -> {
-                    depth += 1
-                    bytes += char.code and 0xFF
-                    index += 1
-                }
-                ')' -> {
-                    depth -= 1
-                    if (depth == 0) {
-                        return ParsedPdfLiteralString(
-                            bytes = ByteArray(bytes.size) { bytes[it].toByte() },
-                            endExclusive = index + 1
-                        )
-                    }
-                    bytes += char.code and 0xFF
-                    index += 1
-                }
-                '\\' -> {
-                    if (index + 1 >= text.length) return null
-                    val next = text[index + 1]
-                    when (next) {
-                        'n' -> {
-                            bytes += '\n'.code
-                            index += 2
-                        }
-                        'r' -> {
-                            bytes += '\r'.code
-                            index += 2
-                        }
-                        't' -> {
-                            bytes += '\t'.code
-                            index += 2
-                        }
-                        'b' -> {
-                            bytes += 0x08
-                            index += 2
-                        }
-                        'f' -> {
-                            bytes += 0x0C
-                            index += 2
-                        }
-                        '(', ')', '\\' -> {
-                            bytes += next.code and 0xFF
-                            index += 2
-                        }
-                        '\r' -> {
-                            index += if (index + 2 < text.length && text[index + 2] == '\n') 3 else 2
-                        }
-                        '\n' -> {
-                            index += 2
-                        }
-                        in '0'..'7' -> {
-                            var end = index + 1
-                            while (end < text.length && end < index + 4 && text[end] in '0'..'7') {
-                                end += 1
-                            }
-                            bytes += text.substring(index + 1, end).toInt(8) and 0xFF
-                            index = end
-                        }
-                        else -> {
-                            bytes += next.code and 0xFF
-                            index += 2
-                        }
-                    }
-                }
-                else -> {
-                    bytes += char.code and 0xFF
-                    index += 1
-                }
-            }
-        }
-        return null
-    }
-
-    private fun trailerBodyWithoutSizeOrEncrypt(inputText: String): String? {
-        val trailerBody = Regex("(?s)trailer\\s*<<(.*?)>>\\s*startxref")
-            .find(inputText)
-            ?.groupValues
-            ?.get(1)
-            ?: return null
-        return trailerBody
-            .replace(Regex("/Size\\s+\\d+"), "")
-            .replace(Regex("/Encrypt\\s+\\d+\\s+\\d+\\s+R"), "")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun objectKey(
-        fileKey: ByteArray,
-        objectNumber: Int,
-        generation: Int,
-        cipherMethod: PdfObjectCipherMethod
-    ): ByteArray {
-        val digest = MessageDigest.getInstance("MD5")
-        digest.update(fileKey)
-        digest.update(byteArrayOf(
-            objectNumber.toByte(),
-            (objectNumber ushr 8).toByte(),
-            (objectNumber ushr 16).toByte(),
-            generation.toByte(),
-            (generation ushr 8).toByte()
-        ))
-        if (cipherMethod == PdfObjectCipherMethod.AesV2) {
-            digest.update(byteArrayOf('s'.code.toByte(), 'A'.code.toByte(), 'l'.code.toByte(), 'T'.code.toByte()))
-        }
-        return digest.digest().copyOf((fileKey.size + 5).coerceAtMost(16))
-    }
-
-    private fun decryptObjectBytes(
-        objectKey: ByteArray,
-        cipherText: ByteArray,
-        cipherMethod: PdfObjectCipherMethod
-    ): ByteArray {
-        return when (cipherMethod) {
-            PdfObjectCipherMethod.Rc4 -> rc4(objectKey, cipherText)
-            PdfObjectCipherMethod.AesV2 -> {
-                require(cipherText.size >= 16) { "AESV2 object data is missing IV" }
-                val iv = cipherText.copyOfRange(0, 16)
-                val encrypted = cipherText.copyOfRange(16, cipherText.size)
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(objectKey, "AES"), IvParameterSpec(iv))
-                cipher.doFinal(encrypted)
-            }
-            PdfObjectCipherMethod.Unsupported -> throw IllegalArgumentException("Unsupported object cipher")
-        }
-    }
-
     private fun padPassword(passwordBytes: ByteArray): ByteArray {
         val output = ByteArray(32)
         val copied = passwordBytes.size.coerceAtMost(32)
@@ -663,16 +375,12 @@ public object FileloomPdfDecryptor {
         return out
     }
 
-    private fun countIndirectObjects(text: String): Int = Regex("(?m)^\\d+\\s+\\d+\\s+obj\\b").findAll(text).count()
-
     private val PASSWORD_PADDING = byteArrayOf(
         0x28, 0xBF.toByte(), 0x4E, 0x5E, 0x4E, 0x75, 0x8A.toByte(), 0x41,
         0x64, 0x00, 0x4E, 0x56, 0xFF.toByte(), 0xFA.toByte(), 0x01, 0x08,
         0x2E, 0x2E, 0x00, 0xB6.toByte(), 0xD0.toByte(), 0x68, 0x3E, 0x80.toByte(),
         0x2F, 0x0C, 0xA9.toByte(), 0xFE.toByte(), 0x64, 0x53, 0x69, 0x7A
     )
-    private const val AESV2_IV_BYTES = 16
-    private const val AES_BLOCK_BYTES = 16
 }
 
 public data class PdfDecryptOptions(
@@ -744,22 +452,11 @@ private data class StandardSecurityDictionary(
     val cipherMethod: PdfObjectCipherMethod
 )
 
-private enum class PdfObjectCipherMethod {
+internal enum class PdfObjectCipherMethod {
     Rc4,
     AesV2,
     Unsupported
 }
-
-private data class PdfPlainObject(
-    val objectNumber: Int,
-    val generation: Int,
-    val body: String
-)
-
-private data class ParsedPdfLiteralString(
-    val bytes: ByteArray,
-    val endExclusive: Int
-)
 
 private inline fun <T> PdfSecurityInput.useByteSource(block: (PdfByteSource) -> T): T {
     return when (this) {
@@ -772,37 +469,44 @@ private inline fun <T> PdfSecurityInput.useByteSource(block: (PdfByteSource) -> 
     }
 }
 
-private fun PdfSecurityInput.exceedsMaxInputBytes(maxInputBytes: Long?): Boolean {
-    val limit = maxInputBytes ?: return false
-    return when (this) {
-        is PdfSecurityInput.FileInput -> file.length() > limit
-        is PdfSecurityInput.ByteSourceInput -> source.length > limit
-    }
-}
+private data class SeekableSecurityInput(
+    val file: File,
+    val ownedSpool: File? = null,
+)
 
-private fun PdfSecurityInput.readAllBytesBounded(maxInputBytes: Long?): ByteArray {
-    return when (this) {
-        is PdfSecurityInput.FileInput -> {
-            val size = file.length()
-            requireAllowedInputSize(size, maxInputBytes)
-            val bytes = file.readBytes()
-            requireAllowedInputSize(bytes.size.toLong(), maxInputBytes)
-            bytes
-        }
-        is PdfSecurityInput.ByteSourceInput -> source.use { securitySource ->
-            val length = securitySource.length
-            requireAllowedInputSize(length, maxInputBytes)
-            if (length > Int.MAX_VALUE.toLong()) {
-                throw IllegalArgumentException("Input is too large")
+private fun stageSeekableSecurityInput(
+    input: PdfSecurityInput,
+    outputDirectory: File,
+    maxInputBytes: Long?,
+): SeekableSecurityInput = when (input) {
+    is PdfSecurityInput.FileInput -> {
+        requireAllowedInputSize(input.file.length(), maxInputBytes)
+        SeekableSecurityInput(file = input.file)
+    }
+    is PdfSecurityInput.ByteSourceInput -> {
+        val length = input.source.length
+        requireAllowedInputSize(length, maxInputBytes)
+        val spool = File.createTempFile("pdf-security-input-", ".spool", outputDirectory)
+        try {
+            input.source.use { source ->
+                FileOutputStream(spool).buffered().use { output ->
+                    val buffer = ByteArray(STREAM_BUFFER_BYTES)
+                    var position = 0L
+                    while (position < length) {
+                        val request = minOf(length - position, buffer.size.toLong()).toInt()
+                        val read = source.read(position, buffer, 0, request)
+                        if (read <= 0) {
+                            throw IOException("Unexpected EOF while staging PDF byte source")
+                        }
+                        output.write(buffer, 0, read)
+                        position += read
+                    }
+                }
             }
-            val output = ByteArray(length.toInt())
-            var position = 0
-            while (position < output.size) {
-                val read = securitySource.read(position.toLong(), output, position, output.size - position)
-                if (read <= 0) break
-                position += read
-            }
-            output.copyOf(position)
+            SeekableSecurityInput(file = spool, ownedSpool = spool)
+        } catch (error: Throwable) {
+            spool.delete()
+            throw error
         }
     }
 }
@@ -842,25 +546,4 @@ private class SecurityPdfByteSourceAdapter(
     override fun close() {
         source.close()
     }
-}
-
-private fun String.hexToBytes(): ByteArray {
-    val normalized = if (length % 2 == 0) this else this + "0"
-    return ByteArray(normalized.length / 2) { index ->
-        normalized.substring(index * 2, index * 2 + 2).toInt(16).toByte()
-    }
-}
-
-private fun ByteArray.toPdfLiteralString(): String {
-    val builder = StringBuilder("(")
-    for (byte in this) {
-        when (val value = byte.toInt() and 0xFF) {
-            '('.code, ')'.code, '\\'.code -> builder.append('\\').append(value.toChar())
-            '\n'.code -> builder.append("\\n")
-            '\r'.code -> builder.append("\\r")
-            '\t'.code -> builder.append("\\t")
-            else -> builder.append(value.toChar())
-        }
-    }
-    return builder.append(')').toString()
 }

@@ -289,7 +289,12 @@ class FileloomPdfDecryptorTest {
         content.append("0 ").append(maxObjectId + 1).append('\n')
         content.append("0000000000 65535 f \n")
         for (objectId in 1..maxObjectId) {
-            content.append(offsets[objectId].toString().padStart(10, '0')).append(" 00000 n \n")
+            val offset = offsets[objectId]
+            if (offset > 0) {
+                content.append(offset.toString().padStart(10, '0')).append(" 00000 n \n")
+            } else {
+                content.append("0000000000 00000 f \n")
+            }
         }
         content.append("trailer\n")
         content.append("<< /Size ").append(maxObjectId + 1).append(" /Root 1 0 R")
