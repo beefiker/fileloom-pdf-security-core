@@ -22,6 +22,8 @@ internal object StreamingEncryptedPdfFixture {
     fun writeAesV2(
         streamPlaintextBytes: Long,
         password: String = "fileloom-stream",
+        streamPrelude: String = "",
+        trailerExtra: String = "",
     ): StreamingAesV2Fixture {
         require(streamPlaintextBytes >= 0L)
         val file = File.createTempFile("fileloom-security-streaming", ".pdf").apply {
@@ -47,7 +49,9 @@ internal object StreamingEncryptedPdfFixture {
             }
             offsets[4] = output.byteCount
             val encryptedLength = 16L + ((streamPlaintextBytes / 16L) + 1L) * 16L
-            output.writeLatin1("4 0 obj\n<< /Length $encryptedLength >>\nstream\n")
+            output.writeLatin1("4 0 obj\n<< /Length $encryptedLength >>\n")
+            output.writeLatin1(streamPrelude)
+            output.writeLatin1("stream\n")
             output.write(iv)
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(
@@ -87,7 +91,9 @@ internal object StreamingEncryptedPdfFixture {
             }
             output.writeLatin1(
                 "trailer\n<< /Size 6 /Root 1 0 R /Encrypt 5 0 R " +
-                    "/ID [<${fileId.toHex()}> <${fileId.toHex()}>] >>\n" +
+                    "/ID [<${fileId.toHex()}> <${fileId.toHex()}>]" +
+                    trailerExtra.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty() +
+                    " >>\n" +
                     "startxref\n$startXref\n%%EOF\n"
             )
         }

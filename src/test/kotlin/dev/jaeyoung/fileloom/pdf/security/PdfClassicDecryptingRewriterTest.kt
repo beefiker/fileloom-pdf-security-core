@@ -153,6 +153,52 @@ class PdfClassicDecryptingRewriterTest {
         assertFalse(output.exists())
     }
 
+    @Test
+    fun trailerRealValuesAreSerializedWithoutExponentNotation() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            trailerExtra = "/Scale 0.0000001",
+        )
+        val output = File.createTempFile("fileloom-real-trailer", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        val outputText = output.readText(Charsets.ISO_8859_1)
+        assertTrue(outputText.contains("/Scale 0.0000001"), outputText)
+        assertFalse(outputText.contains("E-7"), outputText)
+    }
+
+    @Test
+    fun decryptsStreamWhoseKeywordFollowsLongCommentsAndWhitespace() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            streamPrelude = "% delayed stream keyword\n${" ".repeat(300)}",
+        )
+        val output = File.createTempFile("fileloom-delayed-stream", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
     private class TrackingSecurityByteSource(
         private val bytes: ByteArray,
     ) : PdfSecurityByteSource {
