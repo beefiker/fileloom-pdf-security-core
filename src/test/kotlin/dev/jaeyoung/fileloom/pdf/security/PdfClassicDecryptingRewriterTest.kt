@@ -4,6 +4,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import dev.jaeyoung.fileloom.pdf.syntax.PdfObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -231,6 +232,78 @@ class PdfClassicDecryptingRewriterTest {
         assertEquals("classic-xref-offset-unsupported", error.code)
         assertEquals(PdfStreamingRewriteFailureKind.Unsupported, error.kind)
     }
+
+    @Test
+    fun objectHeadersRejectIdentifiersBeforeNarrowingToInt() {
+        val input = File.createTempFile("fileloom-wide-object-id", ".pdf").apply {
+            writeText("4294967297 0 obj\n<< >>\nendobj\n", Charsets.ISO_8859_1)
+            deleteOnExit()
+        }
+        val output = File.createTempFile("fileloom-wide-object-id-output", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+        val layout = singleObjectLayout(input, objectNumber = 1)
+
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            PdfClassicDecryptingRewriter(
+                input = input,
+                output = output,
+                layout = layout,
+                fileKey = byteArrayOf(1, 2, 3, 4, 5),
+                cipherMethod = PdfObjectCipherMethod.Rc4,
+                encryptObjectNumber = null,
+            ).rewrite()
+        }
+
+        assertEquals("object-header-mismatch", error.code)
+    }
+
+    @Test
+    fun streamLengthIsValidatedBeforeOffsetAddition() {
+        val input = File.createTempFile("fileloom-overflow-stream-length", ".pdf").apply {
+            writeText(
+                "4 0 obj\n<< /Length ${Long.MAX_VALUE} >>\nstream\n\nendstream\nendobj\n",
+                Charsets.ISO_8859_1,
+            )
+            deleteOnExit()
+        }
+        val output = File.createTempFile("fileloom-overflow-stream-output", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+        val layout = singleObjectLayout(input, objectNumber = 4)
+
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            PdfClassicDecryptingRewriter(
+                input = input,
+                output = output,
+                layout = layout,
+                fileKey = byteArrayOf(1, 2, 3, 4, 5),
+                cipherMethod = PdfObjectCipherMethod.Rc4,
+                encryptObjectNumber = null,
+            ).rewrite()
+        }
+
+        assertEquals("stream-payload-out-of-range", error.code)
+    }
+
+    private fun singleObjectLayout(input: File, objectNumber: Int): PdfClassicFileLayout =
+        PdfClassicFileLayout(
+            version = "1.4",
+            startXref = input.length(),
+            trailer = PdfObject.Dictionary(
+                mapOf("Size" to PdfObject.IntegerValue(objectNumber.toLong() + 1L))
+            ),
+            objects = listOf(
+                PdfClassicObjectLocation(
+                    objectNumber = objectNumber,
+                    generation = 0,
+                    sourceOffset = 0L,
+                    sourceEndExclusive = input.length(),
+                )
+            ),
+        )
 
     private class TrackingSecurityByteSource(
         private val bytes: ByteArray,

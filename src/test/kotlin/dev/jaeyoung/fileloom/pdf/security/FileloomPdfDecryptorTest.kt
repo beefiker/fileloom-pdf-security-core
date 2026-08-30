@@ -70,6 +70,28 @@ class FileloomPdfDecryptorTest {
     }
 
     @Test
+    fun decryptToFilePreservesValidSignedRc4StreamLengthSyntax() {
+        val encrypted = writeR2EncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "Secret title",
+            plaintextStream = "Hello signed length",
+            streamLengthSyntax = { length -> "+$length" },
+        )
+        val output = File.createTempFile("fileloom-decrypted-signed-length", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        val outputText = output.readText(Charsets.ISO_8859_1)
+        assertTrue(outputText.contains("/Length +"), outputText)
+        assertTrue(outputText.contains("stream\nHello signed length\nendstream"), outputText)
+    }
+
+    @Test
     fun decryptToFileWritesUnencryptedPdfForR3Rc4Fixture() {
         val encrypted = writeR3Rc4EncryptedPdf(userPassword = "fileloom", plaintextTitle = "RC4 128 title")
         val output = File.createTempFile("fileloom-decrypted-r3", ".pdf").apply { delete() }
@@ -175,7 +197,8 @@ class FileloomPdfDecryptorTest {
         userPassword: String,
         plaintextTitle: String,
         plaintextStream: String? = null,
-        titleAsLiteral: Boolean = false
+        titleAsLiteral: Boolean = false,
+        streamLengthSyntax: (Int) -> String = Int::toString,
     ): File {
         val ownerEntry = ByteArray(32) { index -> (0xA0 + index).toByte() }
         val fileId = ByteArray(16) { index -> (0x10 + index).toByte() }
@@ -199,7 +222,7 @@ class FileloomPdfDecryptorTest {
                 objectKey(fileKey, objectNumber = 6, generation = 0),
                 stream.toByteArray(Charsets.ISO_8859_1)
             )
-            objects += 6 to "<< /Length ${encryptedStream.size} >>\nstream\n${encryptedStream.toLatin1String()}\nendstream"
+            objects += 6 to "<< /Length ${streamLengthSyntax(encryptedStream.size)} >>\nstream\n${encryptedStream.toLatin1String()}\nendstream"
         }
 
         return writePdf(
