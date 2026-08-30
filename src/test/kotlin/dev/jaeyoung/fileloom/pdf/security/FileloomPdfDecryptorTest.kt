@@ -92,6 +92,26 @@ class FileloomPdfDecryptorTest {
     }
 
     @Test
+    fun decryptToFileRejectsRc4StreamLengthShorterThanCiphertext() {
+        val encrypted = writeR2EncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "Secret title",
+            plaintextStream = "Length mismatch",
+            streamLengthSyntax = { length -> (length - 1).toString() },
+        )
+        val output = File.createTempFile("fileloom-short-rc4-length", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.MalformedPdf>(result, result.toString())
+        assertFalse(output.exists())
+    }
+
+    @Test
     fun decryptToFileWritesUnencryptedPdfForR3Rc4Fixture() {
         val encrypted = writeR3Rc4EncryptedPdf(userPassword = "fileloom", plaintextTitle = "RC4 128 title")
         val output = File.createTempFile("fileloom-decrypted-r3", ".pdf").apply { delete() }

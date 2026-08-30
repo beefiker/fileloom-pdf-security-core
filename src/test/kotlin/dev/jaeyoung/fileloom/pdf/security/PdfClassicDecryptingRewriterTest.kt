@@ -288,6 +288,50 @@ class PdfClassicDecryptingRewriterTest {
         assertEquals("stream-payload-out-of-range", error.code)
     }
 
+    @Test
+    fun startXrefTextInsideTrailingCommentDoesNotHideRealOffset() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            trailerBeforeEof = "% startxref\n",
+        )
+        val output = File.createTempFile("fileloom-commented-startxref", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
+    @Test
+    fun largePaddingBetweenObjectsIsNotCountedAsObjectSyntax() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            paddingAfterCatalogBytes = 9 * 1024 * 1024,
+        )
+        val output = File.createTempFile("fileloom-inter-object-padding", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
     private fun singleObjectLayout(input: File, objectNumber: Int): PdfClassicFileLayout =
         PdfClassicFileLayout(
             version = "1.4",

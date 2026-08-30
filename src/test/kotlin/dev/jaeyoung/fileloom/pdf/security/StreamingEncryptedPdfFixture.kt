@@ -24,6 +24,8 @@ internal object StreamingEncryptedPdfFixture {
         password: String = "fileloom-stream",
         streamPrelude: String = "",
         trailerExtra: String = "",
+        trailerBeforeEof: String = "",
+        paddingAfterCatalogBytes: Int = 0,
     ): StreamingAesV2Fixture {
         require(streamPlaintextBytes >= 0L)
         val file = File.createTempFile("fileloom-security-streaming", ".pdf").apply {
@@ -43,6 +45,13 @@ internal object StreamingEncryptedPdfFixture {
             output.writeLatin1("%PDF-1.4\n")
             output.writeObject(1, offsets) {
                 writeLatin1("<< /Type /Catalog /Pages 2 0 R /FileloomPayload 4 0 R >>")
+            }
+            var paddingRemaining = paddingAfterCatalogBytes.coerceAtLeast(0)
+            val paddingChunk = ByteArray(minOf(paddingRemaining, 64 * 1024)) { ' '.code.toByte() }
+            while (paddingRemaining > 0) {
+                val count = minOf(paddingRemaining, paddingChunk.size)
+                output.write(paddingChunk, 0, count)
+                paddingRemaining -= count
             }
             output.writeObject(2, offsets) {
                 writeLatin1("<< /Type /Pages /Count 0 >>")
@@ -94,7 +103,9 @@ internal object StreamingEncryptedPdfFixture {
                     "/ID [<${fileId.toHex()}> <${fileId.toHex()}>]" +
                     trailerExtra.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty() +
                     " >>\n" +
-                    "startxref\n$startXref\n%%EOF\n"
+                    "startxref\n$startXref\n" +
+                    trailerBeforeEof +
+                    "%%EOF\n"
             )
         }
 
