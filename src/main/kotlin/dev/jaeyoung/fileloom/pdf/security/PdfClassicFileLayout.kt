@@ -111,6 +111,26 @@ internal object PdfClassicFileLayoutReader {
                             message = "Classic xref has no in-use objects",
                         )
                     }
+                    sortedEntries.forEach { (objectNumber, generation, _) ->
+                        if (objectNumber <= 0) {
+                            throw PdfStreamingRewriteException(
+                                code = "invalid-object-number",
+                                message = "Classic xref in-use object numbers must be positive",
+                            )
+                        }
+                        if (generation !in 0..65_535) {
+                            throw PdfStreamingRewriteException(
+                                code = "invalid-object-generation",
+                                message = "Classic xref generations must fit the five-digit field",
+                            )
+                        }
+                    }
+                    if (sortedEntries.groupingBy { it.first }.eachCount().any { it.value > 1 }) {
+                        throw PdfStreamingRewriteException(
+                            code = "duplicate-object-number",
+                            message = "Classic xref contains multiple in-use generations for one object",
+                        )
+                    }
                     sortedEntries.zipWithNext().forEach { (left, right) ->
                         if (left.third == right.third) {
                             throw PdfStreamingRewriteException(

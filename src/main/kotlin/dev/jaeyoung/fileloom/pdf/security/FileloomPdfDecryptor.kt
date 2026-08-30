@@ -83,6 +83,7 @@ public object FileloomPdfDecryptor {
                 fileKey = fileKey,
                 cipherMethod = cipherMethod,
                 encryptObjectNumber = context.encryptObjectNumber,
+                encryptMetadata = security.encryptMetadata,
             ).rewrite()
 
             try {
@@ -214,6 +215,11 @@ public object FileloomPdfDecryptor {
         if (version == 2 && (revision == 3 || revision == 4)) return PdfObjectCipherMethod.Rc4
         if (version == 4 && revision == 4) {
             val stringFilter = (entries["StrF"] as? PdfObject.Name)?.value ?: "Identity"
+            val streamFilter = (entries["StmF"] as? PdfObject.Name)?.value ?: "Identity"
+            val embeddedFileFilter = (entries["EFF"] as? PdfObject.Name)?.value ?: streamFilter
+            if (setOf(stringFilter, streamFilter, embeddedFileFilter).size != 1) {
+                return PdfObjectCipherMethod.Unsupported
+            }
             val cryptFilters = entries["CF"] as? PdfObject.Dictionary ?: return PdfObjectCipherMethod.Unsupported
             val selectedFilter = cryptFilters.entries[stringFilter] as? PdfObject.Dictionary
                 ?: return PdfObjectCipherMethod.Unsupported

@@ -14,7 +14,9 @@ import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.math.BigDecimal
 import java.security.MessageDigest
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
+import javax.crypto.IllegalBlockSizeException
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -25,6 +27,7 @@ internal class PdfClassicDecryptingRewriter(
     private val fileKey: ByteArray,
     private val cipherMethod: PdfObjectCipherMethod,
     private val encryptObjectNumber: Int?,
+    private val encryptMetadata: Boolean = true,
 ) {
     fun rewrite(): Int {
         val retainedObjects = layout.objects.filterNot { it.objectNumber == encryptObjectNumber }
@@ -193,6 +196,26 @@ internal class PdfClassicDecryptingRewriter(
             cipherMethod = cipherMethod,
         )
 
+        if (!encryptMetadata && stream.isMetadata) {
+            val header = decryptObjectSyntax(
+                stream.headerText,
+                objectKey,
+                cipherMethod,
+            )
+            target.writeLatin1(header)
+            source.seek(payloadOffset)
+            val copied = RandomAccessSliceInputStream(source, stream.encryptedLength)
+                .copyTo(target, STREAM_BUFFER_BYTES)
+            if (copied != stream.encryptedLength) {
+                throw PdfStreamingRewriteException(
+                    code = "stream-payload-truncated",
+                    message = "Unexpected EOF in plaintext metadata stream",
+                )
+            }
+            target.writeLatin1(transformedTail)
+            return
+        }
+
         when (cipherMethod) {
             PdfObjectCipherMethod.Rc4 -> {
                 val header = decryptObjectSyntax(
@@ -221,7 +244,12 @@ internal class PdfClassicDecryptingRewriter(
                         )
                     }
                     val header = decryptObjectSyntax(
-                        updateDirectStreamLength(stream.headerText, plainLength),
+                        updateDirectStreamLength(
+                            header = stream.headerText,
+                            lengthTokenStart = stream.lengthTokenStart,
+                            lengthTokenEndExclusive = stream.lengthTokenEndExclusive,
+                            plainLength = plainLength,
+                        ),
                         objectKey,
                         cipherMethod,
                     )
@@ -282,11 +310,15 @@ internal class PdfClassicDecryptingRewriter(
                 message = "Stream length must be non-negative",
             )
         }
+        val lengthToken = locateTopLevelLengthToken(objectBytes, dictionaryStart.offset.toInt())
         val payloadOffset = skipStreamLineEnding(objectBytes, streamKeyword + STREAM_KEYWORD.size)
         return StreamEnvelope(
             headerText = objectBytes.copyOfRange(0, payloadOffset).toString(Charsets.ISO_8859_1),
             payloadOffset = payloadOffset,
             encryptedLength = length,
+            lengthTokenStart = lengthToken.offset.toInt(),
+            lengthTokenEndExclusive = lengthToken.offset.toInt() + lengthToken.raw.length,
+            isMetadata = (dictionary.entries["Type"] as? PdfObject.Name)?.value == "Metadata",
         )
     }
 
@@ -315,6 +347,100 @@ internal class PdfClassicDecryptingRewriter(
             startPosition = start.toLong(),
         ).nextToken() as? PdfToken.Keyword ?: return null
         return token.offset.toInt().takeIf { token.value == "stream" }
+    }
+
+    private fun locateTopLevelLengthToken(
+        bytes: ByteArray,
+        dictionaryStart: Int,
+    ): PdfToken.IntegerNumber {
+        val cursor = RewriteTokenCursor(
+            PdfLexer(ByteArrayPdfByteSource(bytes), startPosition = dictionaryStart.toLong())
+        )
+        if (cursor.next() !is PdfToken.StartDictionary) {
+            throw PdfStreamingRewriteException(
+                code = "stream-dictionary-invalid",
+                message = "Stream dictionary has no opening token",
+            )
+        }
+        var lengthToken: PdfToken.IntegerNumber? = null
+        while (true) {
+            when (val key = cursor.next()) {
+                is PdfToken.EndDictionary -> return lengthToken
+                    ?: throw PdfStreamingRewriteException(
+                        code = "direct-stream-length-missing",
+                        message = "Stream dictionary has no direct length token",
+                    )
+                is PdfToken.Name -> {
+                    val value = cursor.next() ?: throw PdfStreamingRewriteException(
+                        code = "stream-dictionary-truncated",
+                        message = "Stream dictionary ends before ${key.value}",
+                    )
+                    if (key.value == "Length") {
+                        lengthToken = value as? PdfToken.IntegerNumber
+                            ?: throw PdfStreamingRewriteException(
+                                code = "indirect-stream-length-unsupported",
+                                message = "Only direct stream lengths are supported",
+                            )
+                    }
+                    skipObjectValue(value, cursor)
+                }
+                else -> throw PdfStreamingRewriteException(
+                    code = "stream-dictionary-invalid",
+                    message = "Stream dictionary contains an invalid key",
+                )
+            }
+        }
+    }
+
+    private fun skipObjectValue(first: PdfToken, cursor: RewriteTokenCursor) {
+        when (first) {
+            is PdfToken.StartArray -> {
+                while (true) {
+                    val token = cursor.next() ?: throw PdfStreamingRewriteException(
+                        code = "stream-dictionary-truncated",
+                        message = "Unexpected EOF in array value",
+                    )
+                    if (token is PdfToken.EndArray) return
+                    skipObjectValue(token, cursor)
+                }
+            }
+            is PdfToken.StartDictionary -> {
+                while (true) {
+                    when (val key = cursor.next()) {
+                        is PdfToken.EndDictionary -> return
+                        is PdfToken.Name -> {
+                            val value = cursor.next() ?: throw PdfStreamingRewriteException(
+                                code = "stream-dictionary-truncated",
+                                message = "Unexpected EOF in dictionary value",
+                            )
+                            skipObjectValue(value, cursor)
+                        }
+                        else -> throw PdfStreamingRewriteException(
+                            code = "stream-dictionary-invalid",
+                            message = "Nested dictionary contains an invalid key",
+                        )
+                    }
+                }
+            }
+            is PdfToken.IntegerNumber -> {
+                val second = cursor.next()
+                if (second is PdfToken.IntegerNumber) {
+                    val third = cursor.next()
+                    if (third is PdfToken.Keyword && third.value == "R") return
+                    cursor.pushBack(third)
+                    cursor.pushBack(second)
+                } else {
+                    cursor.pushBack(second)
+                }
+            }
+            is PdfToken.EndArray,
+            is PdfToken.EndDictionary,
+            -> throw PdfStreamingRewriteException(
+                code = "stream-dictionary-invalid",
+                message = "Unexpected closing token in dictionary value",
+            )
+            else -> Unit
+        }
     }
 
     private fun locateNonStreamObjectEnd(bytes: ByteArray): Int? {
@@ -387,15 +513,12 @@ internal class PdfClassicDecryptingRewriter(
         return result
     }
 
-    private fun updateDirectStreamLength(header: String, plainLength: Long): String {
-        val match = DIRECT_LENGTH_REGEX.findAll(header).lastOrNull()
-            ?: throw PdfStreamingRewriteException(
-                code = "direct-stream-length-missing",
-                message = "Stream dictionary has no direct length token",
-            )
-        val prefix = match.groups[1]?.value ?: "/Length "
-        return header.replaceRange(match.range, "$prefix$plainLength")
-    }
+    private fun updateDirectStreamLength(
+        header: String,
+        lengthTokenStart: Int,
+        lengthTokenEndExclusive: Int,
+        plainLength: Long,
+    ): String = header.replaceRange(lengthTokenStart, lengthTokenEndExclusive, plainLength.toString())
 
     private fun serializeTrailer(xrefSize: Long): String {
         val entries = layout.trailer.entries
@@ -414,13 +537,27 @@ internal class PdfClassicDecryptingRewriter(
         val headerText: String,
         val payloadOffset: Int,
         val encryptedLength: Long,
+        val lengthTokenStart: Int,
+        val lengthTokenEndExclusive: Int,
+        val isMetadata: Boolean,
     )
 
     private companion object {
         const val MAX_NON_STREAM_OBJECT_BYTES = 8L * 1024L * 1024L
         val STREAM_KEYWORD = "stream".toByteArray(Charsets.US_ASCII)
-        val DIRECT_LENGTH_REGEX = Regex("(/Length\\s+)\\d+")
         val REMOVED_TRAILER_KEYS = setOf("Size", "Encrypt", "Prev", "XRefStm")
+    }
+}
+
+private class RewriteTokenCursor(
+    private val lexer: PdfLexer,
+) {
+    private val pushedBack = ArrayDeque<PdfToken>()
+
+    fun next(): PdfToken? = if (pushedBack.isEmpty()) lexer.nextToken() else pushedBack.removeLast()
+
+    fun pushBack(token: PdfToken?) {
+        if (token != null) pushedBack.addLast(token)
     }
 }
 
@@ -462,91 +599,136 @@ private fun decryptObjectSyntax(
     objectKey: ByteArray,
     cipherMethod: PdfObjectCipherMethod,
 ): String {
-    val literalDecrypted = decryptLiteralStrings(text, objectKey, cipherMethod)
-    return HEX_STRING_REGEX.replace(literalDecrypted) { match ->
-        val cipherText = match.groupValues[1].filterNot(Char::isWhitespace).hexToBytes()
-        if (!canDecryptObjectString(cipherText, cipherMethod)) return@replace match.value
-        decryptObjectBytes(objectKey, cipherText, cipherMethod).toPdfLiteralString()
-    }
-}
-
-private fun decryptLiteralStrings(
-    text: String,
-    objectKey: ByteArray,
-    cipherMethod: PdfObjectCipherMethod,
-): String {
     val output = StringBuilder(text.length)
     var index = 0
     while (index < text.length) {
-        if (text[index] != '(') {
-            output.append(text[index++])
-            continue
-        }
-        val parsed = parsePdfLiteralString(text, index)
-        if (parsed == null || !canDecryptObjectString(parsed.bytes, cipherMethod)) {
-            if (parsed == null) {
-                output.append(text[index++])
-            } else {
-                output.append(text, index, parsed.endExclusive)
-                index = parsed.endExclusive
+        when {
+            text[index] == '%' -> {
+                val endExclusive = text.indexOfAny(charArrayOf('\r', '\n'), startIndex = index)
+                    .takeIf { it >= 0 }
+                    ?: text.length
+                output.append(text, index, endExclusive)
+                index = endExclusive
             }
-            continue
+            text[index] == '(' -> {
+                val parsed = parsePdfLiteralString(text, index)
+                if (parsed == null || !canDecryptObjectString(parsed.bytes, cipherMethod)) {
+                    if (parsed == null) {
+                        output.append(text[index++])
+                    } else {
+                        output.append(text, index, parsed.endExclusive)
+                        index = parsed.endExclusive
+                    }
+                } else {
+                    output.append(decryptObjectBytes(objectKey, parsed.bytes, cipherMethod).toPdfLiteralString())
+                    index = parsed.endExclusive
+                }
+            }
+            text[index] == '<' && index + 1 < text.length && text[index + 1] == '<' -> {
+                output.append("<<")
+                index += 2
+            }
+            text[index] == '<' -> {
+                val parsed = parsePdfHexString(text, index)
+                if (parsed == null || !canDecryptObjectString(parsed.bytes, cipherMethod)) {
+                    if (parsed == null) {
+                        output.append(text[index++])
+                    } else {
+                        output.append(text, index, parsed.endExclusive)
+                        index = parsed.endExclusive
+                    }
+                } else {
+                    output.append(decryptObjectBytes(objectKey, parsed.bytes, cipherMethod).toPdfLiteralString())
+                    index = parsed.endExclusive
+                }
+            }
+            else -> output.append(text[index++])
         }
-        output.append(decryptObjectBytes(objectKey, parsed.bytes, cipherMethod).toPdfLiteralString())
-        index = parsed.endExclusive
     }
     return output.toString()
 }
 
 private fun parsePdfLiteralString(text: String, start: Int): ParsedLiteralString? {
     if (start >= text.length || text[start] != '(') return null
-    val bytes = mutableListOf<Int>()
+    val bytes = ByteArray(text.length - start)
+    var byteCount = 0
     var index = start + 1
     var depth = 1
     while (index < text.length) {
         when (val char = text[index]) {
             '(' -> {
                 depth += 1
-                bytes += char.code and 0xFF
+                bytes[byteCount++] = (char.code and 0xFF).toByte()
                 index += 1
             }
             ')' -> {
                 depth -= 1
                 if (depth == 0) {
                     return ParsedLiteralString(
-                        bytes = ByteArray(bytes.size) { bytes[it].toByte() },
+                        bytes = bytes.copyOf(byteCount),
                         endExclusive = index + 1,
                     )
                 }
-                bytes += char.code and 0xFF
+                bytes[byteCount++] = (char.code and 0xFF).toByte()
                 index += 1
             }
             '\\' -> {
                 if (index + 1 >= text.length) return null
                 val next = text[index + 1]
                 when (next) {
-                    'n' -> { bytes += '\n'.code; index += 2 }
-                    'r' -> { bytes += '\r'.code; index += 2 }
-                    't' -> { bytes += '\t'.code; index += 2 }
-                    'b' -> { bytes += 0x08; index += 2 }
-                    'f' -> { bytes += 0x0C; index += 2 }
-                    '(', ')', '\\' -> { bytes += next.code and 0xFF; index += 2 }
+                    'n' -> { bytes[byteCount++] = '\n'.code.toByte(); index += 2 }
+                    'r' -> { bytes[byteCount++] = '\r'.code.toByte(); index += 2 }
+                    't' -> { bytes[byteCount++] = '\t'.code.toByte(); index += 2 }
+                    'b' -> { bytes[byteCount++] = 0x08; index += 2 }
+                    'f' -> { bytes[byteCount++] = 0x0C; index += 2 }
+                    '(', ')', '\\' -> { bytes[byteCount++] = (next.code and 0xFF).toByte(); index += 2 }
                     '\r' -> index += if (index + 2 < text.length && text[index + 2] == '\n') 3 else 2
                     '\n' -> index += 2
                     in '0'..'7' -> {
                         var end = index + 1
                         while (end < text.length && end < index + 4 && text[end] in '0'..'7') end += 1
-                        bytes += text.substring(index + 1, end).toInt(8) and 0xFF
+                        bytes[byteCount++] = (text.substring(index + 1, end).toInt(8) and 0xFF).toByte()
                         index = end
                     }
-                    else -> { bytes += next.code and 0xFF; index += 2 }
+                    else -> { bytes[byteCount++] = (next.code and 0xFF).toByte(); index += 2 }
                 }
             }
             else -> {
-                bytes += char.code and 0xFF
+                bytes[byteCount++] = (char.code and 0xFF).toByte()
                 index += 1
             }
         }
+    }
+    return null
+}
+
+private fun parsePdfHexString(text: String, start: Int): ParsedHexString? {
+    if (start >= text.length || text[start] != '<') return null
+    val bytes = ByteArray((text.length - start + 1) / 2)
+    var byteCount = 0
+    var highNibble = -1
+    var index = start + 1
+    while (index < text.length) {
+        val char = text[index]
+        if (char == '>') {
+            if (highNibble >= 0) {
+                bytes[byteCount++] = (highNibble shl 4).toByte()
+            }
+            return ParsedHexString(
+                bytes = bytes.copyOf(byteCount),
+                endExclusive = index + 1,
+            )
+        }
+        if (!char.isWhitespace()) {
+            val value = char.digitToIntOrNull(16) ?: return null
+            if (highNibble < 0) {
+                highNibble = value
+            } else {
+                bytes[byteCount++] = ((highNibble shl 4) or value).toByte()
+                highNibble = -1
+            }
+        }
+        index += 1
     }
     return null
 }
@@ -574,7 +756,21 @@ private fun decryptObjectBytes(
             SecretKeySpec(objectKey, "AES"),
             IvParameterSpec(cipherText.copyOfRange(0, 16)),
         )
-        cipher.doFinal(cipherText, 16, cipherText.size - 16)
+        try {
+            cipher.doFinal(cipherText, 16, cipherText.size - 16)
+        } catch (error: BadPaddingException) {
+            throw PdfStreamingRewriteException(
+                code = "aesv2-string-invalid",
+                message = error.message ?: "Invalid AESV2 string payload",
+                cause = error,
+            )
+        } catch (error: IllegalBlockSizeException) {
+            throw PdfStreamingRewriteException(
+                code = "aesv2-string-invalid",
+                message = error.message ?: "Invalid AESV2 string payload",
+                cause = error,
+            )
+        }
     }
     PdfObjectCipherMethod.Unsupported -> error("Unsupported object cipher")
 }
@@ -631,13 +827,6 @@ private fun escapePdfName(value: String): String = buildString(value.length) {
     }
 }
 
-private fun String.hexToBytes(): ByteArray {
-    val normalized = if (length % 2 == 0) this else this + "0"
-    return ByteArray(normalized.length / 2) { index ->
-        normalized.substring(index * 2, index * 2 + 2).toInt(16).toByte()
-    }
-}
-
 private fun ByteArray.toPdfLiteralString(): String = buildString(size + 2) {
     append('(')
     this@toPdfLiteralString.forEach { byte ->
@@ -657,7 +846,10 @@ private data class ParsedLiteralString(
     val endExclusive: Int,
 )
 
-private val HEX_STRING_REGEX = Regex("<([0-9A-Fa-f\\s]+)>")
+private data class ParsedHexString(
+    val bytes: ByteArray,
+    val endExclusive: Int,
+)
 
 private class RandomAccessSliceInputStream(
     private val input: RandomAccessFile,
