@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -197,6 +198,38 @@ class PdfClassicDecryptingRewriterTest {
 
         assertIs<PdfDecryptResult.Success>(result, result.toString())
         assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
+    @Test
+    fun decryptsLargeStreamWhoseHeaderExceedsLegacyProbeWindow() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 9L * 1024L * 1024L,
+            streamPrelude = "% large delayed stream keyword\n${" ".repeat(70 * 1024)}",
+        )
+        val output = File.createTempFile("fileloom-large-delayed-stream", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
+    @Test
+    fun classicXrefOffsetsRejectValuesWiderThanTenDigits() {
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            formatClassicXrefOffset(10_000_000_000L)
+        }
+
+        assertEquals("classic-xref-offset-unsupported", error.code)
+        assertEquals(PdfStreamingRewriteFailureKind.Unsupported, error.kind)
     }
 
     private class TrackingSecurityByteSource(

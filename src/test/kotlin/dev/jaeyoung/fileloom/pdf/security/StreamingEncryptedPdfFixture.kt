@@ -252,7 +252,7 @@ internal fun corruptLastByteOfFirstStream(file: File) {
 
 private fun firstStreamDescriptor(file: File): PdfTestStreamDescriptor {
     RandomAccessFile(file, "r").use { input ->
-        val prefix = ByteArray(minOf(file.length(), 64L * 1024L).toInt())
+        val prefix = ByteArray(minOf(file.length(), 1024L * 1024L).toInt())
         input.readFully(prefix)
         val text = prefix.toString(Charsets.ISO_8859_1)
         val objectStart = text.indexOf("4 0 obj")

@@ -78,7 +78,7 @@ internal class PdfClassicDecryptingRewriter(
             target.writeLatin1("${section.first().key} ${section.size}\n")
             section.forEach { (_, entry) ->
                 target.writeLatin1(
-                    entry.offset.toString().padStart(10, '0') + " " +
+                    formatClassicXrefOffset(entry.offset) + " " +
                         entry.generation.toString().padStart(5, '0') + " n \n"
                 )
             }
@@ -117,7 +117,7 @@ internal class PdfClassicDecryptingRewriter(
             return
         }
 
-        val prefixLength = minOf(rangeLength, STREAM_HEADER_PROBE_BYTES.toLong()).toInt()
+        val prefixLength = minOf(rangeLength, MAX_NON_STREAM_OBJECT_BYTES).toInt()
         val prefix = readRange(source, location.sourceOffset, prefixLength)
         val stream = parseStreamEnvelope(prefix, location)
             ?: throw PdfStreamingRewriteException(
@@ -337,11 +337,20 @@ internal class PdfClassicDecryptingRewriter(
 
     private companion object {
         const val MAX_NON_STREAM_OBJECT_BYTES = 8L * 1024L * 1024L
-        const val STREAM_HEADER_PROBE_BYTES = 64 * 1024
         val STREAM_KEYWORD = "stream".toByteArray(Charsets.US_ASCII)
         val DIRECT_LENGTH_REGEX = Regex("(/Length\\s+)\\d+")
         val REMOVED_TRAILER_KEYS = setOf("Size", "Encrypt", "Prev", "XRefStm")
     }
+}
+
+internal fun formatClassicXrefOffset(offset: Long): String {
+    if (offset !in 0L..9_999_999_999L) {
+        throw PdfStreamingRewriteException(
+            code = "classic-xref-offset-unsupported",
+            message = "Classic xref offsets are limited to ten decimal digits",
+        )
+    }
+    return offset.toString().padStart(10, '0')
 }
 
 private fun pdfObjectKey(

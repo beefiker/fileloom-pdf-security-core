@@ -43,6 +43,7 @@ internal class PdfStreamingRewriteException(
             "non-stream-object-too-large",
             "stream-tail-too-large",
             "indirect-stream-length-unsupported",
+            "classic-xref-offset-unsupported",
         )
     }
 }
