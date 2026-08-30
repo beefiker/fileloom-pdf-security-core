@@ -202,6 +202,54 @@ class PdfClassicDecryptingRewriterTest {
     }
 
     @Test
+    fun aesLengthRewriteTargetsTheDictionaryEntryInsteadOfTrailingComments() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            streamPrelude = "% /Length 999999\n",
+        )
+        val output = File.createTempFile("fileloom-commented-length", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        val outputText = output.readText(Charsets.ISO_8859_1)
+        assertTrue(outputText.contains("<< /Length 1024 >>"), outputText)
+        assertTrue(outputText.contains("% /Length 999999"), outputText)
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
+    @Test
+    fun aesLengthRewriteAcceptsALeadingPlusOnTheEncryptedLength() {
+        val fixture = StreamingEncryptedPdfFixture.writeAesV2(
+            streamPlaintextBytes = 1024,
+            streamLengthSyntax = { "+$it" },
+        )
+        val output = File.createTempFile("fileloom-signed-aes-length", ".pdf").apply {
+            delete()
+            deleteOnExit()
+        }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(fixture.encryptedFile),
+            password = fixture.password.toCharArray(),
+            output = output,
+            options = PdfDecryptOptions(overwriteOutput = true),
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertTrue(output.readText(Charsets.ISO_8859_1).contains("<< /Length 1024 >>"))
+        assertEquals(fixture.expectedPlaintextSha256, sha256OfFirstStream(output))
+    }
+
+    @Test
     fun decryptsLargeStreamWhoseHeaderExceedsLegacyProbeWindow() {
         val fixture = StreamingEncryptedPdfFixture.writeAesV2(
             streamPlaintextBytes = 9L * 1024L * 1024L,

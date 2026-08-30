@@ -49,6 +49,25 @@ class FileloomPdfDecryptorTest {
     }
 
     @Test
+    fun decryptedLiteralStringIsNotReprocessedAsHexSyntax() {
+        val encrypted = writeR2EncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "<4142>",
+            titleAsLiteral = true,
+        )
+        val output = File.createTempFile("fileloom-decrypted-literal-hex", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        assertTrue(output.readText(Charsets.ISO_8859_1).contains("(<4142>)"))
+    }
+
+    @Test
     fun decryptToFileDecryptsR2Rc4Streams() {
         val encrypted = writeR2EncryptedPdf(
             userPassword = "fileloom",
@@ -168,6 +187,96 @@ class FileloomPdfDecryptorTest {
     }
 
     @Test
+    fun invalidAesStringPaddingIsReportedAsMalformedPdf() {
+        val encrypted = writeR4AesEncryptedPdf(userPassword = "fileloom", plaintextTitle = "AES title")
+        val encryptedText = encrypted.readText(Charsets.ISO_8859_1)
+        val titleMatch = Regex("/Title <([0-9a-fA-F]+)>").find(encryptedText)
+            ?: error("fixture has no encrypted title")
+        val titleHex = titleMatch.groupValues[1]
+        val changedNibble = (titleHex[31].digitToInt(16) xor 1).toString(16)
+        val corruptedTitleHex = titleHex.replaceRange(31, 32, changedNibble)
+        encrypted.writeText(
+            encryptedText.replaceRange(
+                titleMatch.groups[1]!!.range,
+                corruptedTitleHex,
+            ),
+            Charsets.ISO_8859_1,
+        )
+        val output = File.createTempFile("fileloom-invalid-aes-string", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.MalformedPdf>(result, result.toString())
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun mixedStringAndStreamCryptFiltersAreRejectedBeforeRewriting() {
+        val encrypted = writeR4AesEncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "AES title",
+            streamFilter = "Identity",
+        )
+        val output = File.createTempFile("fileloom-mixed-crypt-filters", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.UnsupportedEncryption>(result, result.toString())
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun mixedEmbeddedFileCryptFilterIsRejectedBeforeRewriting() {
+        val encrypted = writeR4AesEncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "AES title",
+            embeddedFileFilter = "Identity",
+        )
+        val output = File.createTempFile("fileloom-mixed-embedded-filter", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.UnsupportedEncryption>(result, result.toString())
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun metadataStreamRemainsPlainWhenEncryptMetadataIsFalse() {
+        val plaintextMetadata = "<x:xmpmeta>plain metadata</x:xmpmeta>"
+        val encrypted = writeR4AesEncryptedPdf(
+            userPassword = "fileloom",
+            plaintextTitle = "AES title",
+            plaintextStream = plaintextMetadata,
+            encryptMetadata = false,
+            streamIsMetadata = true,
+        )
+        val output = File.createTempFile("fileloom-plain-metadata", ".pdf").apply { delete() }
+
+        val result = FileloomPdfDecryptor.decryptToFile(
+            input = PdfSecurityInput.FileInput(encrypted),
+            password = "fileloom".toCharArray(),
+            output = output,
+        )
+
+        assertIs<PdfDecryptResult.Success>(result, result.toString())
+        val outputText = output.readText(Charsets.ISO_8859_1)
+        assertTrue(outputText.contains("/Type /Metadata"), outputText)
+        assertTrue(outputText.contains("stream\n$plaintextMetadata\nendstream"), outputText)
+    }
+
+    @Test
     fun decryptToFilePreservesPlainAesV2StringTokensThatAreNotCipherPayloads() {
         val encrypted = writeR4AesEncryptedPdf(
             userPassword = "fileloom",
@@ -275,12 +384,16 @@ class FileloomPdfDecryptorTest {
         userPassword: String,
         plaintextTitle: String,
         plaintextStream: String? = null,
-        extraObjects: List<Pair<Int, String>> = emptyList()
+        extraObjects: List<Pair<Int, String>> = emptyList(),
+        streamFilter: String = "StdCF",
+        embeddedFileFilter: String? = null,
+        encryptMetadata: Boolean = true,
+        streamIsMetadata: Boolean = false,
     ): File {
         val ownerEntry = ByteArray(32) { index -> (0x70 + index).toByte() }
         val fileId = ByteArray(16) { index -> (0x40 + index).toByte() }
         val permissions = -4
-        val fileKey = computeR4FileKey(userPassword, ownerEntry, permissions, fileId, encryptMetadata = true)
+        val fileKey = computeR4FileKey(userPassword, ownerEntry, permissions, fileId, encryptMetadata)
         val userEntry = computeR4UserEntry(fileKey, fileId)
         val encryptedTitle = aesV2Encrypt(
             objectAesKey(fileKey, objectNumber = 4, generation = 0),
@@ -288,19 +401,26 @@ class FileloomPdfDecryptorTest {
             iv = ByteArray(16) { index -> (0x20 + index).toByte() }
         )
 
+        val embeddedFileFilterSyntax = embeddedFileFilter?.let { " /EFF /$it" }.orEmpty()
         val objects = mutableListOf(
             1 to "<< /Type /Catalog /Pages 2 0 R >>",
             2 to "<< /Type /Pages /Count 0 >>",
             4 to "<< /Title <${encryptedTitle.toHex()}> >>",
-            5 to "<< /Filter /Standard /V 4 /R 4 /Length 128 /P $permissions /O <${ownerEntry.toHex()}> /U <${userEntry.toHex()}> /EncryptMetadata true /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /StdCF /StrF /StdCF >>"
+            5 to "<< /Filter /Standard /V 4 /R 4 /Length 128 /P $permissions /O <${ownerEntry.toHex()}> /U <${userEntry.toHex()}> /EncryptMetadata $encryptMetadata /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /$streamFilter /StrF /StdCF$embeddedFileFilterSyntax >>"
         )
         plaintextStream?.let { stream ->
-            val encryptedStream = aesV2Encrypt(
-                objectAesKey(fileKey, objectNumber = 6, generation = 0),
-                stream.toByteArray(Charsets.ISO_8859_1),
-                iv = ByteArray(16) { index -> (0x50 + index).toByte() }
-            )
-            objects += 6 to "<< /Length ${encryptedStream.size} >>\nstream\n${encryptedStream.toLatin1String()}\nendstream"
+            val plainBytes = stream.toByteArray(Charsets.ISO_8859_1)
+            val streamBytes = if (streamIsMetadata && !encryptMetadata) {
+                plainBytes
+            } else {
+                aesV2Encrypt(
+                    objectAesKey(fileKey, objectNumber = 6, generation = 0),
+                    plainBytes,
+                    iv = ByteArray(16) { index -> (0x50 + index).toByte() }
+                )
+            }
+            val streamType = if (streamIsMetadata) "/Type /Metadata /Subtype /XML " else ""
+            objects += 6 to "<< $streamType/Length ${streamBytes.size} >>\nstream\n${streamBytes.toLatin1String()}\nendstream"
         }
         objects += extraObjects
 

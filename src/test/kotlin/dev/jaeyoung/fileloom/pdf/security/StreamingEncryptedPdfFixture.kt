@@ -23,6 +23,7 @@ internal object StreamingEncryptedPdfFixture {
         streamPlaintextBytes: Long,
         password: String = "fileloom-stream",
         streamPrelude: String = "",
+        streamLengthSyntax: (Long) -> String = { it.toString() },
         trailerExtra: String = "",
         trailerBeforeEof: String = "",
         paddingAfterCatalogBytes: Int = 0,
@@ -58,7 +59,7 @@ internal object StreamingEncryptedPdfFixture {
             }
             offsets[4] = output.byteCount
             val encryptedLength = 16L + ((streamPlaintextBytes / 16L) + 1L) * 16L
-            output.writeLatin1("4 0 obj\n<< /Length $encryptedLength >>\n")
+            output.writeLatin1("4 0 obj\n<< /Length ${streamLengthSyntax(encryptedLength)} >>\n")
             output.writeLatin1(streamPrelude)
             output.writeLatin1("stream\n")
             output.write(iv)

@@ -44,6 +44,46 @@ class PdfClassicFileLayoutTest {
         assertEquals("xref-stream-unsupported", error.code)
     }
 
+    @Test
+    fun rejectsInUseObjectZeroBeforeRewrite() {
+        val file = classicObjectIdentityFixture(
+            ObjectIdentity(objectNumber = 0, generation = 0),
+        )
+
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            PdfClassicFileLayoutReader.read(file)
+        }
+
+        assertEquals("invalid-object-number", error.code)
+    }
+
+    @Test
+    fun rejectsGenerationOutsideTheClassicXrefField() {
+        val file = classicObjectIdentityFixture(
+            ObjectIdentity(objectNumber = 1, generation = 65_536),
+        )
+
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            PdfClassicFileLayoutReader.read(file)
+        }
+
+        assertEquals("invalid-object-generation", error.code)
+    }
+
+    @Test
+    fun rejectsMultipleInUseGenerationsForOneObjectNumber() {
+        val file = classicObjectIdentityFixture(
+            ObjectIdentity(objectNumber = 1, generation = 0),
+            ObjectIdentity(objectNumber = 1, generation = 1),
+        )
+
+        val error = assertFailsWith<PdfStreamingRewriteException> {
+            PdfClassicFileLayoutReader.read(file)
+        }
+
+        assertEquals("duplicate-object-number", error.code)
+    }
+
     private fun classicEncryptedFixtureWithPrevTrailer(): File {
         val fixture = StreamingEncryptedPdfFixture.writeAesV2(1024)
         val original = fixture.encryptedFile.readBytes()
@@ -85,4 +125,38 @@ class PdfClassicFileLayoutTest {
         )
         return file
     }
+
+    private fun classicObjectIdentityFixture(vararg identities: ObjectIdentity): File {
+        val file = File.createTempFile("fileloom-classic-identities", ".pdf").apply {
+            deleteOnExit()
+        }
+        val content = StringBuilder("%PDF-1.4\n")
+        val offsets = identities.map { identity ->
+            val offset = content.length
+            content.append("${identity.objectNumber} ${identity.generation} obj\n<< >>\nendobj\n")
+            identity to offset
+        }
+        val startXref = content.length
+        content.append("xref\n")
+        offsets.forEach { (identity, offset) ->
+            content.append("${identity.objectNumber} 1\n")
+            content.append(offset.toString().padStart(10, '0'))
+                .append(' ')
+                .append(identity.generation.toString().padStart(5, '0'))
+                .append(" n \n")
+        }
+        val root = identities.last()
+        val size = identities.maxOf { it.objectNumber }.toLong() + 1L
+        content.append(
+            "trailer\n<< /Size $size /Root ${root.objectNumber} ${root.generation} R >>\n" +
+                "startxref\n$startXref\n%%EOF\n"
+        )
+        file.writeText(content.toString(), Charsets.ISO_8859_1)
+        return file
+    }
+
+    private data class ObjectIdentity(
+        val objectNumber: Int,
+        val generation: Int,
+    )
 }
