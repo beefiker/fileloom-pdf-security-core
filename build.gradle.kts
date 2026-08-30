@@ -34,6 +34,23 @@ tasks.test {
     useJUnitPlatform()
 }
 
+val streamingMemoryTest by tasks.registering(Test::class) {
+    description = "Runs the large-stream PDF decrypt regression under a bounded heap."
+    group = "verification"
+    useJUnitPlatform()
+    maxHeapSize = "128m"
+    filter {
+        includeTestsMatching(
+            "dev.jaeyoung.fileloom.pdf.security.FileloomPdfStreamingMemoryTest"
+        )
+    }
+    shouldRunAfter(tasks.test)
+}
+
+tasks.named("check") {
+    dependsOn(streamingMemoryTest)
+}
+
 val requiresSigning = !version.toString().endsWith("SNAPSHOT") &&
     gradle.startParameter.taskNames.any { it.contains("publish", ignoreCase = true) }
 
