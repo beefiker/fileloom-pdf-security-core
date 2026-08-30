@@ -33,52 +33,55 @@ internal class PdfClassicDecryptingRewriter(
                 message = "PDF contains no decryptable indirect objects",
             )
         }
-        val originalSize = (layout.trailer.entries["Size"] as? PdfObject.IntegerValue)
-            ?.value?.toInt()
-            ?.coerceAtLeast(1)
-            ?: 1
-        val xrefSize = maxOf(
-            originalSize,
-            (layout.objects.maxOfOrNull(PdfClassicObjectLocation::objectNumber) ?: 0) + 1,
-        )
-        val offsets = LongArray(xrefSize) { -1L }
-        val generations = IntArray(xrefSize)
         output.parentFile?.mkdirs()
 
         RandomAccessFile(input, "r").use { source ->
             CountingOutputStream(BufferedOutputStream(FileOutputStream(output))).use { target ->
                 target.writeLatin1("%PDF-${layout.version}\n")
+                val objectOffsets = linkedMapOf<Int, RewrittenXrefEntry>()
                 retainedObjects.forEach { location ->
-                    if (location.objectNumber !in offsets.indices) {
-                        throw PdfStreamingRewriteException(
-                            code = "object-number-out-of-range",
-                            message = "Object number exceeds trailer size",
-                        )
-                    }
-                    offsets[location.objectNumber] = target.byteCount
-                    generations[location.objectNumber] = location.generation
+                    objectOffsets[location.objectNumber] = RewrittenXrefEntry(
+                        offset = target.byteCount,
+                        generation = location.generation,
+                    )
                     writeObject(source, target, location)
                 }
                 val startXref = target.byteCount
-                target.writeLatin1("xref\n0 $xrefSize\n")
-                target.writeLatin1("0000000000 65535 f \n")
-                for (objectNumber in 1 until xrefSize) {
-                    val offset = offsets[objectNumber]
-                    if (offset >= 0L) {
-                        target.writeLatin1(
-                            offset.toString().padStart(10, '0') + " " +
-                                generations[objectNumber].toString().padStart(5, '0') + " n \n"
-                        )
-                    } else {
-                        target.writeLatin1("0000000000 65535 f \n")
-                    }
-                }
+                writeSparseXref(target, objectOffsets)
+                val xrefSize = (objectOffsets.keys.maxOrNull()?.toLong() ?: 0L) + 1L
                 target.writeLatin1("trailer\n")
                 target.writeLatin1(serializeTrailer(xrefSize))
                 target.writeLatin1("\nstartxref\n$startXref\n%%EOF\n")
             }
         }
         return retainedObjects.size
+    }
+
+    private fun writeSparseXref(
+        target: CountingOutputStream,
+        entries: Map<Int, RewrittenXrefEntry>,
+    ) {
+        target.writeLatin1("xref\n0 1\n0000000000 65535 f \n")
+        val sorted = entries.entries.sortedBy(Map.Entry<Int, RewrittenXrefEntry>::key)
+        var index = 0
+        while (index < sorted.size) {
+            val section = mutableListOf(sorted[index])
+            index += 1
+            while (
+                index < sorted.size &&
+                sorted[index].key == section.last().key + 1
+            ) {
+                section += sorted[index]
+                index += 1
+            }
+            target.writeLatin1("${section.first().key} ${section.size}\n")
+            section.forEach { (_, entry) ->
+                target.writeLatin1(
+                    entry.offset.toString().padStart(10, '0') + " " +
+                        entry.generation.toString().padStart(5, '0') + " n \n"
+                )
+            }
+        }
     }
 
     private fun writeObject(
@@ -317,13 +320,18 @@ internal class PdfClassicDecryptingRewriter(
         return header.replaceRange(match.range, "$prefix$plainLength")
     }
 
-    private fun serializeTrailer(xrefSize: Int): String {
+    private fun serializeTrailer(xrefSize: Long): String {
         val entries = layout.trailer.entries
             .filterKeys { key -> key !in REMOVED_TRAILER_KEYS }
             .toMutableMap()
-        entries["Size"] = PdfObject.IntegerValue(xrefSize.toLong())
+        entries["Size"] = PdfObject.IntegerValue(xrefSize)
         return serializePdfObject(PdfObject.Dictionary(entries))
     }
+
+    private data class RewrittenXrefEntry(
+        val offset: Long,
+        val generation: Int,
+    )
 
     private data class StreamEnvelope(
         val headerText: String,

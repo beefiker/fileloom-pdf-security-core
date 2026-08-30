@@ -110,17 +110,19 @@ public object FileloomPdfDecryptor {
                 decryptedObjectCount = decryptedObjectCount,
             )
         } catch (error: PdfStreamingRewriteException) {
-            output.delete()
-            PdfDecryptResult.UnsupportedEncryption("${error.code}: ${error.message}")
+            when (error.kind) {
+                PdfStreamingRewriteFailureKind.Unsupported ->
+                    PdfDecryptResult.UnsupportedEncryption("${error.code}: ${error.message}")
+                PdfStreamingRewriteFailureKind.Malformed ->
+                    PdfDecryptResult.MalformedPdf("${error.code}: ${error.message}")
+            }
         } catch (error: IllegalArgumentException) {
-            output.delete()
             if (error.message == "Input exceeds maxInputBytes") {
                 PdfDecryptResult.UnsupportedEncryption("Input exceeds maxInputBytes")
             } else {
                 PdfDecryptResult.IoFailure(error)
             }
         } catch (t: Throwable) {
-            output.delete()
             PdfDecryptResult.IoFailure(t)
         } finally {
             outputTemp?.delete()
@@ -481,14 +483,25 @@ private fun stageSeekableSecurityInput(
 ): SeekableSecurityInput = when (input) {
     is PdfSecurityInput.FileInput -> {
         requireAllowedInputSize(input.file.length(), maxInputBytes)
-        SeekableSecurityInput(file = input.file)
-    }
-    is PdfSecurityInput.ByteSourceInput -> {
-        val length = input.source.length
-        requireAllowedInputSize(length, maxInputBytes)
         val spool = File.createTempFile("pdf-security-input-", ".spool", outputDirectory)
         try {
-            input.source.use { source ->
+            FileInputStream(input.file).buffered().use { source ->
+                FileOutputStream(spool).buffered().use { output ->
+                    copyInputStreamBounded(source, output, maxInputBytes)
+                }
+            }
+            SeekableSecurityInput(file = spool, ownedSpool = spool)
+        } catch (error: Throwable) {
+            spool.delete()
+            throw error
+        }
+    }
+    is PdfSecurityInput.ByteSourceInput -> {
+        input.source.use { source ->
+            val length = source.length
+            requireAllowedInputSize(length, maxInputBytes)
+            val spool = File.createTempFile("pdf-security-input-", ".spool", outputDirectory)
+            try {
                 FileOutputStream(spool).buffered().use { output ->
                     val buffer = ByteArray(STREAM_BUFFER_BYTES)
                     var position = 0L
@@ -502,12 +515,34 @@ private fun stageSeekableSecurityInput(
                         position += read
                     }
                 }
+                SeekableSecurityInput(file = spool, ownedSpool = spool)
+            } catch (error: Throwable) {
+                spool.delete()
+                throw error
             }
-            SeekableSecurityInput(file = spool, ownedSpool = spool)
-        } catch (error: Throwable) {
-            spool.delete()
-            throw error
         }
+    }
+}
+
+private fun copyInputStreamBounded(
+    source: java.io.InputStream,
+    output: java.io.OutputStream,
+    maxInputBytes: Long?,
+) {
+    val buffer = ByteArray(STREAM_BUFFER_BYTES)
+    var copied = 0L
+    while (true) {
+        val request = if (maxInputBytes == null) {
+            buffer.size
+        } else {
+            minOf(buffer.size.toLong(), (maxInputBytes - copied + 1L).coerceAtLeast(1L)).toInt()
+        }
+        val read = source.read(buffer, 0, request)
+        if (read < 0) return
+        if (read == 0) throw IOException("Input stream made no progress")
+        copied += read
+        requireAllowedInputSize(copied, maxInputBytes)
+        output.write(buffer, 0, read)
     }
 }
 

@@ -28,7 +28,29 @@ internal class PdfStreamingRewriteException(
     val code: String,
     message: String,
     cause: Throwable? = null,
-) : Exception(message, cause)
+) : Exception(message, cause) {
+    val kind: PdfStreamingRewriteFailureKind = if (code in UNSUPPORTED_CODES) {
+        PdfStreamingRewriteFailureKind.Unsupported
+    } else {
+        PdfStreamingRewriteFailureKind.Malformed
+    }
+
+    private companion object {
+        val UNSUPPORTED_CODES = setOf(
+            "incremental-xref-unsupported",
+            "xref-stream-unsupported",
+            "object-cipher-unsupported",
+            "non-stream-object-too-large",
+            "stream-tail-too-large",
+            "indirect-stream-length-unsupported",
+        )
+    }
+}
+
+internal enum class PdfStreamingRewriteFailureKind {
+    Unsupported,
+    Malformed,
+}
 
 internal object PdfClassicFileLayoutReader {
     fun read(input: File): PdfClassicFileLayout {
