@@ -6,7 +6,7 @@ plugins {
 }
 
 group = providers.gradleProperty("group").orNull ?: "dev.jaeyoung"
-version = providers.gradleProperty("version").orNull ?: "0.1.3"
+version = providers.gradleProperty("version").orNull ?: "0.1.5"
 
 description = "Fileloom PDF security/decryption core library"
 
@@ -32,6 +32,28 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    filter {
+        excludeTestsMatching(
+            "dev.jaeyoung.fileloom.pdf.security.FileloomPdfStreamingMemoryTest"
+        )
+    }
+}
+
+val streamingMemoryTest by tasks.registering(Test::class) {
+    description = "Runs the large-stream PDF decrypt regression under a bounded heap."
+    group = "verification"
+    useJUnitPlatform()
+    maxHeapSize = "128m"
+    filter {
+        includeTestsMatching(
+            "dev.jaeyoung.fileloom.pdf.security.FileloomPdfStreamingMemoryTest"
+        )
+    }
+    shouldRunAfter(tasks.test)
+}
+
+tasks.named("check") {
+    dependsOn(streamingMemoryTest)
 }
 
 val requiresSigning = !version.toString().endsWith("SNAPSHOT") &&
